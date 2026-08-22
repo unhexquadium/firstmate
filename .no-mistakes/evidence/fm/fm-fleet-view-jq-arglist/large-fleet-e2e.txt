@@ -1,0 +1,48 @@
+$ base fm-fleet-snapshot.sh --json with 29 task metas and 40000-byte decision summaries
+exit=1
+/tmp/fm-large-fleet-e2e.SrGnsW/base-bin/fm-fleet-snapshot.sh: line 635: /usr/bin/jq: Argument list too long
+fm-fleet-snapshot: main inventory summary failed
+
+$ target fm-fleet-snapshot.sh --json with the same 29-meta fleet
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "task_count": 29,
+  "max_decision_summary_bytes": 40000,
+  "main_inventory_valid": true
+}
+
+$ target fm-fleet-snapshot.sh --secondmate-home-summary with the same 29-meta fleet
+{
+  "schema": "fm-secondmate-home-summary.v1",
+  "endpoint_count": 29,
+  "decision_count": 29,
+  "shown_endpoints": 20,
+  "omitted": [
+    {
+      "surface": "decisions_open",
+      "count": 9
+    },
+    {
+      "surface": "endpoints",
+      "count": 9
+    }
+  ]
+}
+
+$ target fm-fleet-view.sh with the same 29-meta fleet (representative rendered rows)
+# Fleet View
+
+Schema: fm-fleet-snapshot.v1
+Home: /tmp/fm-large-fleet-e2e.SrGnsW/home
+
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| large-task-01 | unknown / none | ship | alpha | tmux | present | - | - | bin/fm-peek.sh fm-large-task-01 |
+| large-task-02 | unknown / none | ship | alpha | tmux | present | - | - | bin/fm-peek.sh fm-large-task-02 |
+| large-task-03 | unknown / none | ship | alpha | tmux | present | - | - | bin/fm-peek.sh fm-large-task-03 |
+| large-task-29 | unknown / none | ship | alpha | tmux | present | - | - | bin/fm-peek.sh fm-large-task-29 |
+
+$ byte-for-byte normal-case comparison: base vs target with two ordinary task metas
+identical=yes
+sha256=23d0e11154effa398116f6989c202a4c0b1f0df694ad341276afbb54f61916dd
