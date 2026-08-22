@@ -8,7 +8,7 @@
 #     acquisitions. Every returned path is normalized and compared with every
 #     worktree= value in <state-dir>/*.meta. The function redraws until it sets
 #     FM_TREEHOUSE_LEASE_PATH to a non-colliding path or fails loudly after
-#     eight attempts.
+#     exhausting the distinct recorded collision paths plus one safe draw.
 #   fm_treehouse_lease_return_if_holder <project-dir> <path> <holder>
 #     Releases one accepted lease during pre-publication spawn rollback, guarded
 #     by Treehouse's holder check so cleanup cannot return another owner's lease.
@@ -26,6 +26,7 @@
 FM_TREEHOUSE_LEASE_PATH=
 FM_TREEHOUSE_COLLISION_OWNER=
 FM_TREEHOUSE_COLLISION_ERROR=
+FM_TREEHOUSE_COLLISION_PATH_COUNT=0
 FM_TREEHOUSE_ACQUIRE_GUARDS=
 FM_WORKTREE_GUARD_PID=
 FM_WORKTREE_GUARD_IDENTITY=
@@ -67,6 +68,33 @@ fm_worktree_collision_owner() {  # <state-dir> <candidate>
     return 0
   done
   return 1
+}
+
+fm_worktree_collision_path_count() {  # <state-dir>
+  local state=$1 meta recorded recorded_real count paths=$'\n'
+  FM_TREEHOUSE_COLLISION_PATH_COUNT=0
+  FM_TREEHOUSE_COLLISION_ERROR=
+  [ -d "$state" ] || return 0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+      FM_TREEHOUSE_COLLISION_ERROR="unsafe task metadata path: $meta"
+      return 2
+    fi
+    count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
+    if [ "$count" -gt 1 ]; then
+      FM_TREEHOUSE_COLLISION_ERROR="ambiguous worktree fields in task metadata: $meta"
+      return 2
+    fi
+    recorded=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | tail -n 1)
+    [ -n "$recorded" ] || continue
+    recorded_real=$(fm_worktree_real_or_raw "$recorded")
+    case "$paths" in
+      *$'\n'"$recorded_real"$'\n'*) continue ;;
+    esac
+    paths="${paths}${recorded_real}"$'\n'
+    FM_TREEHOUSE_COLLISION_PATH_COUNT=$((FM_TREEHOUSE_COLLISION_PATH_COUNT + 1))
+  done
 }
 
 fm_worktree_meta_local_path() {  # <meta> -> sets FM_WORKTREE_PROTECTION_WORKTREE
@@ -225,8 +253,14 @@ fm_treehouse_acquire_barrier_start() {  # <state-dir>
 }
 
 fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder>
-  local state=$1 project=$2 holder=$3 attempts=8 attempt=0 candidate rejected=0 collision_status
+  local state=$1 project=$2 holder=$3 attempts attempt=0 candidate candidate_real
+  local rejected=0 rejected_paths=$'\n' collision_status
   FM_TREEHOUSE_LEASE_PATH=
+  if ! fm_worktree_collision_path_count "$state"; then
+    echo "error: cannot derive the durable Treehouse redraw bound from task metadata: $FM_TREEHOUSE_COLLISION_ERROR" >&2
+    return 1
+  fi
+  attempts=$((FM_TREEHOUSE_COLLISION_PATH_COUNT + 1))
   fm_treehouse_acquire_barrier_start "$state" || return 1
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
@@ -251,6 +285,15 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       /*) ;;
     esac
     if fm_worktree_collision_owner "$state" "$candidate"; then
+      candidate_real=$(fm_worktree_real_or_raw "$candidate")
+      case "$rejected_paths" in
+        *$'\n'"$candidate_real"$'\n'*)
+          fm_treehouse_acquire_barrier_stop
+          echo "error: treehouse repeated recorded live task worktree '$candidate' after rejecting $rejected distinct collision(s); refusing further redraws after $attempt of $attempts bounded attempts" >&2
+          return 1
+          ;;
+      esac
+      rejected_paths="${rejected_paths}${candidate_real}"$'\n'
       rejected=$((rejected + 1))
       echo "warning: treehouse returned pre-excluded recorded live task worktree '$candidate' owned by $FM_TREEHOUSE_COLLISION_OWNER; preserving that durable lease and redrawing ($attempt/$attempts)" >&2
       continue
