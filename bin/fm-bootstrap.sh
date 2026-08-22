@@ -1118,9 +1118,9 @@ if [ "${1:-}" = "install" ]; then
 fi
 
 # This is the first mutating block at a locked session boundary. It re-establishes
-# presence protection for recorded legacy Treehouse worktrees before any later
-# action could acquire one, then pauses an identity-matched watcher, holds its
-# lock, and neutralizes legacy PR checks. Detect-only sessions never touch state,
+# durable or presence protection for recorded legacy Treehouse worktrees before
+# any later action could acquire one, then pauses an identity-matched watcher,
+# holds its lock, and neutralizes legacy PR checks. Detect-only sessions never touch state,
 # and the deferred network pass never repeats it: the local pass that ran first
 # already closed both windows.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then

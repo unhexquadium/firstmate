@@ -18,6 +18,20 @@ make_spawn_fakebin() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+worktree_in_use() {
+  local path=$1 link cwd
+  if [ -d /proc ]; then
+    for link in /proc/[0-9]*/cwd; do
+      cwd=$(readlink "$link" 2>/dev/null || true)
+      case "$cwd" in
+        "$path"|"$path"/*) return 0 ;;
+      esac
+    done
+    return 1
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof -a -d cwd +D "$path" >/dev/null 2>&1
+}
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?FM_FAKE_TREEHOUSE_LOG unset}"
 case "${1:-}" in
   get)
@@ -39,6 +53,9 @@ case "${1:-}" in
     printf '%s\n' "$count" > "$FM_FAKE_TREEHOUSE_COUNT"
     path=$(sed -n "${count}p" "$FM_FAKE_TREEHOUSE_SEQUENCE")
     [ -n "$path" ] || path=$(tail -n 1 "$FM_FAKE_TREEHOUSE_SEQUENCE")
+    if [ "$path" = "${FM_FAKE_PROTECTED_PATH:-}" ] && ! worktree_in_use "$path"; then
+      : > "${FM_FAKE_PREACQUIRE_VIOLATION:?FM_FAKE_PREACQUIRE_VIOLATION unset}"
+    fi
     printf '%s\n' "$path"
     ;;
   return) exit 0 ;;
@@ -97,6 +114,8 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$pane_path" \
     FM_FAKE_TREEHOUSE_LOG="$log" FM_FAKE_TREEHOUSE_COUNT="$count" \
     FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
     FM_FAKE_EXPECT_HOLDER="fm-$id" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
@@ -119,6 +138,8 @@ test_colliding_lease_is_redrawn() {
     "spawn did not record the non-colliding redraw"
   [ "$(cat "$CASE_DIR/treehouse.count")" -eq 2 ] \
     || fail "colliding lease was not redrawn exactly once"
+  assert_absent "$CASE_DIR/preacquire-violation" \
+    "Treehouse reached a recorded path before its exclusion barrier was active"
   assert_no_grep '^return ' "$CASE_DIR/treehouse.log" \
     "spawn returned the colliding worktree instead of preserving its repaired lease"
   pass "a lease colliding with recorded task metadata is rejected and redrawn"
@@ -142,6 +163,8 @@ test_exhausted_redraw_fails_loudly() {
     "exhausted redraw published task metadata despite having no safe worktree"
   [ "$(cat "$CASE_DIR/treehouse.count")" -eq 8 ] \
     || fail "exhausted redraw did not stop at the configured attempt bound"
+  assert_absent "$CASE_DIR/preacquire-violation" \
+    "bounded redraw acquired a recorded path before its exclusion barrier was active"
   pass "an exhausted redraw loop stops at its bound and fails loudly"
 }
 
