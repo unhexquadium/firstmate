@@ -352,11 +352,32 @@ fm_worktree_durable_exclusion_register() {  # <record> <worktree>
   fi
 }
 
-fm_worktree_meta_protection_mode() {  # <meta> -> sets mode and worktree globals
-  local meta=$1 pool_status result status
+fm_worktree_meta_protection_mode() {  # <meta> <protection-dir> -> sets mode and worktree globals
+  local meta=$1 protection_dir=$2 pool_status result status inspection_root record guard_pid
+  local -a ignored_pids=()
   FM_WORKTREE_PROTECTION_MODE=
   fm_worktree_meta_local_path "$meta" || return $?
-  if ! pool_status=$(CDPATH='' cd -- "$FM_WORKTREE_PROTECTION_WORKTREE" \
+  inspection_root=$(git -C "$FM_WORKTREE_PROTECTION_WORKTREE" worktree list --porcelain 2>/dev/null \
+    | sed -n 's/^worktree //p' | head -n 1)
+  if [ -z "$inspection_root" ] || [ ! -d "$inspection_root" ]; then
+    FM_WORKTREE_PROTECTION_ERROR="could not resolve an inspection root outside recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
+    return 2
+  fi
+  inspection_root=$(fm_worktree_real_or_raw "$inspection_root")
+  if [ "$inspection_root" = "$FM_WORKTREE_PROTECTION_WORKTREE" ]; then
+    FM_WORKTREE_PROTECTION_ERROR="treehouse inspection root is the recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
+    return 2
+  fi
+  if [ -d "$protection_dir" ] && [ ! -L "$protection_dir" ]; then
+    for record in "$protection_dir"/*.protection; do
+      [ -f "$record" ] && [ ! -L "$record" ] || continue
+      fm_worktree_protection_record_matches \
+        "$record" presence "$FM_WORKTREE_PROTECTION_WORKTREE" || continue
+      guard_pid=$(fm_worktree_protection_record_value "$record" pid)
+      ignored_pids+=("$guard_pid")
+    done
+  fi
+  if ! pool_status=$(CDPATH='' cd -- "$inspection_root" \
     && treehouse status --json 2>/dev/null); then
     FM_WORKTREE_PROTECTION_ERROR="treehouse status failed for recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
     return 2
@@ -374,8 +395,13 @@ fm_worktree_meta_protection_mode() {  # <meta> -> sets mode and worktree globals
       process.exit(0);
     }
     if (!Array.isArray(row.processes)) process.exit(2);
-    process.stdout.write(row.processes.length ? "presence" : "durable");
-  ' "$FM_WORKTREE_PROTECTION_WORKTREE" 2>/dev/null)
+    const ignored = new Set(process.argv.slice(2).map((pid) => Number(pid)));
+    const occupants = row.processes.filter((process) => {
+      if (!process || !Number.isInteger(process.pid)) process.exit(2);
+      return !ignored.has(process.pid);
+    });
+    process.stdout.write(occupants.length ? "presence" : "durable");
+  ' "$FM_WORKTREE_PROTECTION_WORKTREE" "${ignored_pids[@]}" 2>/dev/null)
   status=$?
   case "$status" in
     0) FM_WORKTREE_PROTECTION_MODE=$result ;;
@@ -410,7 +436,7 @@ fm_worktree_protection_sweep() {  # <state-dir>
     mode=
     if [ -f "$meta" ] && [ ! -L "$meta" ]; then
       FM_WORKTREE_PROTECTION_ERROR=
-      if fm_worktree_meta_protection_mode "$meta" 2>/dev/null; then
+      if fm_worktree_meta_protection_mode "$meta" "$protection_dir" 2>/dev/null; then
         status=0
       else
         status=$?
@@ -446,7 +472,7 @@ fm_worktree_protection_sweep() {  # <state-dir>
         ;;
     esac
     FM_WORKTREE_PROTECTION_ERROR=
-    if fm_worktree_meta_protection_mode "$meta"; then
+    if fm_worktree_meta_protection_mode "$meta" "$protection_dir"; then
       status=0
       worktree=$FM_WORKTREE_PROTECTION_WORKTREE
       mode=$FM_WORKTREE_PROTECTION_MODE

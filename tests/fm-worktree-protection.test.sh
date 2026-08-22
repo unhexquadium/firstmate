@@ -13,10 +13,14 @@ set -u
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worktree-protection)
 GUARD_PID=
+AGENT_PID=
 
 cleanup_guard() {
   if [ -n "$GUARD_PID" ]; then
     kill "$GUARD_PID" 2>/dev/null || true
+  fi
+  if [ -n "$AGENT_PID" ]; then
+    kill "$AGENT_PID" 2>/dev/null || true
   fi
   fm_test_cleanup
 }
@@ -30,6 +34,22 @@ make_treehouse_fakebin() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+worktree_pids() {
+  local path=$1 link cwd pid
+  if [ -d /proc ]; then
+    for link in /proc/[0-9]*/cwd; do
+      cwd=$(readlink "$link" 2>/dev/null || true)
+      case "$cwd" in
+        "$path"|"$path"/*)
+          pid=${link#/proc/}
+          printf '%s\n' "${pid%/cwd}"
+          ;;
+      esac
+    done
+    return
+  fi
+  lsof -a -d cwd +D "$path" -t 2>/dev/null || true
+}
 case "${1:-}" in
   get)
     [ "${2:-}" = --help ] || exit 1
@@ -37,10 +57,18 @@ case "${1:-}" in
     ;;
   status)
     [ "${2:-}" = --json ] || exit 1
+    processes='['
+    separator=
+    while IFS= read -r pid; do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      processes="${processes}${separator}{\"pid\":${pid},\"name\":\"process\"}"
+      separator=,
+    done < <(worktree_pids "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" | sort -un)
+    processes="${processes}]"
     printf '[{"path":"%s","lease_id":"%s","processes":%s}]\n' \
       "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
       "${FM_FAKE_TREEHOUSE_LEASE_ID:-}" \
-      "${FM_FAKE_TREEHOUSE_PROCESSES:-[]}"
+      "$processes"
     ;;
   *) exit 1 ;;
 esac
@@ -54,7 +82,6 @@ run_bootstrap() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_PATH="$WORKTREE_DIR" \
-    FM_FAKE_TREEHOUSE_PROCESSES="${TREEHOUSE_PROCESSES:-[]}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$BOOTSTRAP" 2>&1
 }
@@ -71,13 +98,15 @@ assert_guard_stops() {
 test_bootstrap_splits_durable_and_presence_protection() {
   local out record first_pid second_pid recorded_identity current_identity
   HOME_DIR="$TMP_ROOT/home"
+  PROJECT_DIR="$TMP_ROOT/project"
   WORKTREE_DIR="$TMP_ROOT/pool-worktree"
   FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/fake")
   mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
-    "$HOME_DIR/config" "$WORKTREE_DIR"
+    "$HOME_DIR/config"
+  fm_git_worktree "$PROJECT_DIR" "$WORKTREE_DIR" protection-live
   fm_write_meta "$HOME_DIR/state/live-task.meta" \
     'window=firstmate:fm-live-task' "worktree=$WORKTREE_DIR" \
-    "project=$TMP_ROOT/project" 'harness=codex' 'kind=ship'
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
 
   out=$(FM_BOOTSTRAP_DETECT_ONLY=1 run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
@@ -85,7 +114,6 @@ test_bootstrap_splits_durable_and_presence_protection() {
   assert_absent "$HOME_DIR/state/.worktree-protection/live-task.protection" \
     "detect-only bootstrap registered worktree protection"
 
-  TREEHOUSE_PROCESSES=[]
   out=$(run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
     "bootstrap reported a protection failure for a quiescent pool worktree"
@@ -102,7 +130,13 @@ test_bootstrap_splits_durable_and_presence_protection() {
   assert_grep 'mode=durable' "$record" \
     "idempotent bootstrap replaced durable protection with presence"
 
-  TREEHOUSE_PROCESSES='[{"pid":4242,"name":"agent"}]'
+  bash -c 'cd "$1" || exit 1; exec sleep 2147483647' \
+    fm-test-agent "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
+  AGENT_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$AGENT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+    sleep 0.05
+  done
   out=$(run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
     "bootstrap reported a protection failure for an occupied pool worktree"
@@ -126,7 +160,9 @@ test_bootstrap_splits_durable_and_presence_protection() {
   [ "$second_pid" = "$first_pid" ] \
     || fail "idempotent bootstrap replaced a healthy worktree presence guard"
 
-  TREEHOUSE_PROCESSES=[]
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
   run_bootstrap >/dev/null
   assert_grep 'mode=durable' "$record" \
     "quiescent transition did not replace presence with durable protection"
@@ -141,7 +177,7 @@ test_bootstrap_splits_durable_and_presence_protection() {
 
   fm_write_meta "$HOME_DIR/state/leased-task.meta" \
     'window=firstmate:fm-leased-task' "worktree=$WORKTREE_DIR" \
-    "project=$TMP_ROOT/project" 'harness=codex' 'kind=ship'
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
   out=$(FM_FAKE_TREEHOUSE_LEASE_ID=durable-lease run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
     "bootstrap reported a protection failure for an already durable lease"

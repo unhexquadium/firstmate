@@ -11,6 +11,19 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-lease-guard)
+BLOCKED_SPAWN_PID=
+BLOCKED_TREEHOUSE_PID=
+BLOCKED_BARRIER_PID=
+
+cleanup_blocked_spawn() {
+  [ -z "$BLOCKED_SPAWN_PID" ] || kill "$BLOCKED_SPAWN_PID" 2>/dev/null || true
+  [ -z "$BLOCKED_TREEHOUSE_PID" ] || kill "$BLOCKED_TREEHOUSE_PID" 2>/dev/null || true
+  [ -z "$BLOCKED_BARRIER_PID" ] || kill "$BLOCKED_BARRIER_PID" 2>/dev/null || true
+  fm_test_cleanup
+}
+trap cleanup_blocked_spawn EXIT
+trap 'cleanup_blocked_spawn; exit 130' INT
+trap 'cleanup_blocked_spawn; exit 143' TERM
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -18,19 +31,25 @@ make_spawn_fakebin() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-worktree_in_use() {
-  local path=$1 link cwd
+worktree_pids() {
+  local path=$1 link cwd pid
   if [ -d /proc ]; then
     for link in /proc/[0-9]*/cwd; do
       cwd=$(readlink "$link" 2>/dev/null || true)
       case "$cwd" in
-        "$path"|"$path"/*) return 0 ;;
+        "$path"|"$path"/*)
+          pid=${link#/proc/}
+          printf '%s\n' "${pid%/cwd}"
+          ;;
       esac
     done
-    return 1
+    return
   fi
-  command -v lsof >/dev/null 2>&1 || return 1
-  lsof -a -d cwd +D "$path" >/dev/null 2>&1
+  command -v lsof >/dev/null 2>&1 || return 0
+  lsof -a -d cwd +D "$path" -t 2>/dev/null || true
+}
+worktree_in_use() {
+  [ -n "$(worktree_pids "$1" | head -n 1)" ]
 }
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?FM_FAKE_TREEHOUSE_LOG unset}"
 case "${1:-}" in
@@ -55,6 +74,12 @@ case "${1:-}" in
     [ -n "$path" ] || path=$(tail -n 1 "$FM_FAKE_TREEHOUSE_SEQUENCE")
     if [ "$path" = "${FM_FAKE_PROTECTED_PATH:-}" ] && ! worktree_in_use "$path"; then
       : > "${FM_FAKE_PREACQUIRE_VIOLATION:?FM_FAKE_PREACQUIRE_VIOLATION unset}"
+    fi
+    if [ "${FM_FAKE_BLOCK_GET:-0}" = 1 ] && [ "$count" -eq 1 ]; then
+      worktree_pids "${FM_FAKE_PROTECTED_PATH:?FM_FAKE_PROTECTED_PATH unset}" \
+        | head -n 1 > "${FM_FAKE_BARRIER_PID_FILE:?FM_FAKE_BARRIER_PID_FILE unset}"
+      printf '%s\n' "$$" > "${FM_FAKE_BLOCK_READY:?FM_FAKE_BLOCK_READY unset}"
+      sleep 2
     fi
     printf '%s\n' "$path"
     ;;
@@ -205,9 +230,73 @@ test_unpublished_lease_is_returned_on_abort() {
   pass "an accepted lease is holder-conditionally returned when spawn aborts before publication"
 }
 
+test_interrupted_acquisition_reaps_barrier() {
+  local rec id spawn_pid barrier_pid barrier_identity current_identity status _
+  id=lease-interrupt-r5
+  rec=$(make_case interrupt "$id")
+  read_case_record "$rec"
+  fm_write_meta "$HOME_DIR/state/live-owner.meta" \
+    'window=firstmate:fm-live-owner' "worktree=$COLLISION_DIR" \
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
+  : > "$CASE_DIR/treehouse.log"
+  printf '%s\n%s\n' "$COLLISION_DIR" "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$SAFE_DIR" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" FM_FAKE_BLOCK_GET=1 \
+    FM_FAKE_BLOCK_READY="$CASE_DIR/block-ready" \
+    FM_FAKE_BARRIER_PID_FILE="$CASE_DIR/barrier.pid" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off \
+    >"$CASE_DIR/spawn.out" 2>&1 &
+  spawn_pid=$!
+  BLOCKED_SPAWN_PID=$spawn_pid
+  for _ in $(seq 1 60); do
+    [ -s "$CASE_DIR/block-ready" ] && [ -s "$CASE_DIR/barrier.pid" ] && break
+    sleep 0.05
+  done
+  [ -s "$CASE_DIR/barrier.pid" ] || fail "blocked acquisition did not expose its cwd barrier"
+  BLOCKED_TREEHOUSE_PID=$(cat "$CASE_DIR/block-ready")
+  barrier_pid=$(cat "$CASE_DIR/barrier.pid")
+  BLOCKED_BARRIER_PID=$barrier_pid
+  barrier_identity=$(fm_test_pid_identity "$barrier_pid") \
+    || fail "blocked acquisition barrier was not alive"
+
+  kill -TERM "$spawn_pid" 2>/dev/null || fail "could not interrupt blocked spawn"
+  kill -TERM "$BLOCKED_TREEHOUSE_PID" 2>/dev/null || true
+  if wait "$spawn_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  BLOCKED_SPAWN_PID=
+  BLOCKED_TREEHOUSE_PID=
+  [ "$status" -ne 0 ] || fail "interrupted spawn reported success"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    current_identity=$(fm_test_pid_identity "$barrier_pid" 2>/dev/null || true)
+    [ "$current_identity" != "$barrier_identity" ] && break
+    sleep 0.05
+  done
+  current_identity=$(fm_test_pid_identity "$barrier_pid" 2>/dev/null || true)
+  [ "$current_identity" != "$barrier_identity" ] \
+    || fail "interrupted spawn orphaned its pre-acquisition cwd barrier"
+  BLOCKED_BARRIER_PID=
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "interrupted acquisition published task metadata"
+  pass "an interrupted acquisition reaps its temporary cwd barrier"
+}
+
 test_colliding_lease_is_redrawn
 test_exhausted_redraw_fails_loudly
 test_non_colliding_lease_is_unaffected
 test_unpublished_lease_is_returned_on_abort
+test_interrupted_acquisition_reaps_barrier
 
 echo "# all fm-spawn-worktree-lease-guard tests passed"
