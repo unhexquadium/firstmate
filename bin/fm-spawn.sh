@@ -801,6 +801,8 @@ spawn_abort_cleanup() {
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
+trap 'fm_treehouse_acquire_signal_exit 130' INT
+trap 'fm_treehouse_acquire_signal_exit 143' TERM
 
 # One bounded lock per live Herdr session/socket, shared across all homes.
 # <session> is required so secondmate and primary spawns serialize against the

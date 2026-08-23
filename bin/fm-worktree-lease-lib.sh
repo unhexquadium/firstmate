@@ -31,6 +31,8 @@ FM_TREEHOUSE_COLLISION_OWNER=
 FM_TREEHOUSE_COLLISION_ERROR=
 FM_TREEHOUSE_COLLISION_PATH_COUNT=0
 FM_TREEHOUSE_ACQUIRE_GUARDS=
+FM_TREEHOUSE_ACQUIRE_PID=
+FM_TREEHOUSE_ACQUIRE_OUTPUT=
 FM_WORKTREE_GUARD_PID=
 FM_WORKTREE_GUARD_IDENTITY=
 FM_WORKTREE_PROTECTION_ERROR=
@@ -222,6 +224,26 @@ fm_treehouse_acquire_barrier_stop() {
   FM_TREEHOUSE_ACQUIRE_GUARDS=
 }
 
+fm_treehouse_active_acquire_stop() {
+  local pid=$FM_TREEHOUSE_ACQUIRE_PID output=$FM_TREEHOUSE_ACQUIRE_OUTPUT
+  if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 0.1
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  FM_TREEHOUSE_ACQUIRE_PID=
+  FM_TREEHOUSE_ACQUIRE_OUTPUT=
+  [ -z "$output" ] || rm -f -- "$output"
+}
+
+fm_treehouse_acquire_signal_exit() {
+  local status=$1
+  fm_treehouse_active_acquire_stop
+  fm_treehouse_acquire_barrier_stop
+  exit "$status"
+}
+
 fm_treehouse_acquire_barrier_start() {  # <state-dir>
   local state=$1 meta status worktree protection_dir record mode guarded_paths=$'\n'
   FM_TREEHOUSE_ACQUIRE_GUARDS=
@@ -286,7 +308,7 @@ fm_treehouse_acquire_barrier_start() {  # <state-dir>
 
 fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder>
   local state=$1 project=$2 holder=$3 attempts attempt=0 candidate candidate_real
-  local rejected=0 rejected_paths=$'\n' collision_status
+  local rejected=0 rejected_paths=$'\n' collision_status acquire_status
   FM_TREEHOUSE_LEASE_PATH=
   if ! fm_worktree_collision_path_count "$state"; then
     echo "error: cannot derive the durable Treehouse redraw bound from task metadata: $FM_TREEHOUSE_COLLISION_ERROR" >&2
@@ -296,8 +318,26 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
   fm_treehouse_acquire_barrier_start "$state" || return 1
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
-    if ! candidate=$(CDPATH='' cd -- "$project" \
-      && treehouse get --lease --lease-holder "$holder"); then
+    FM_TREEHOUSE_ACQUIRE_OUTPUT=$(mktemp "$state/.treehouse-acquire.XXXXXX") || {
+      fm_treehouse_acquire_barrier_stop
+      echo "error: could not create Treehouse acquisition output under $state" >&2
+      return 1
+    }
+    (
+      CDPATH='' cd -- "$project" || exit 1
+      exec treehouse get --lease --lease-holder "$holder"
+    ) > "$FM_TREEHOUSE_ACQUIRE_OUTPUT" &
+    FM_TREEHOUSE_ACQUIRE_PID=$!
+    if wait "$FM_TREEHOUSE_ACQUIRE_PID"; then
+      acquire_status=0
+    else
+      acquire_status=$?
+    fi
+    FM_TREEHOUSE_ACQUIRE_PID=
+    candidate=$(< "$FM_TREEHOUSE_ACQUIRE_OUTPUT")
+    rm -f -- "$FM_TREEHOUSE_ACQUIRE_OUTPUT"
+    FM_TREEHOUSE_ACQUIRE_OUTPUT=
+    if [ "$acquire_status" -ne 0 ]; then
       fm_treehouse_acquire_barrier_stop
       if [ "$rejected" -gt 0 ]; then
         echo "error: treehouse durable lease attempt $attempt failed after rejecting $rejected recorded live task worktree collision(s); could not produce a non-colliding worktree within $attempts attempts" >&2
@@ -450,6 +490,20 @@ fm_worktree_process_is_shell() {  # <comm>
   return 1
 }
 
+fm_worktree_shell_process_is_idle() {  # <args>
+  local args=$1 index token
+  local words=()
+  read -r -a words <<< "$args"
+  [ "${#words[@]}" -gt 0 ] || return 1
+  for ((index=1; index<${#words[@]}; index++)); do
+    token=${words[$index]}
+    case "$token" in
+      -l|-i|-li|-il|--login|--noprofile|--norc|--noediting) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 fm_worktree_process_matches_harness() {  # <comm> <args> <harness>
   local comm=$1 args=$2 harness=$3 base argv0 argv0_base name
   base=${comm##*/}
@@ -515,12 +569,18 @@ fm_worktree_structural_protection_mode() {  # <meta> <process-pids> <protection-
       "$FM_WORKTREE_PROTECTION_WORKTREE"|"$FM_WORKTREE_PROTECTION_WORKTREE"/*) ;;
       *) continue ;;
     esac
+    if fm_worktree_process_is_shell "$FM_WORKTREE_PROCESS_COMM"; then
+      if fm_worktree_process_is_shell "$harness" \
+         && ! fm_worktree_shell_process_is_idle "$FM_WORKTREE_PROCESS_ARGS"; then
+        uncertain_pid=$pid
+      fi
+      continue
+    fi
     if fm_worktree_process_matches_harness \
       "$FM_WORKTREE_PROCESS_COMM" "$FM_WORKTREE_PROCESS_ARGS" "$harness"; then
       agent_found=1
       continue
     fi
-    fm_worktree_process_is_shell "$FM_WORKTREE_PROCESS_COMM" && continue
     uncertain_pid=$pid
   done <<< "$process_pids"
   if [ "$agent_found" -eq 1 ]; then

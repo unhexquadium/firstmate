@@ -839,6 +839,8 @@ seed_home() {
 
   mkdir -p "$STATE" || return 1
   trap seed_exit_cleanup EXIT
+  trap 'fm_treehouse_acquire_signal_exit 130' INT
+  trap 'fm_treehouse_acquire_signal_exit 143' TERM
   if [ "$requested_home" = "-" ]; then
     SEED_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || return 1
     fm_lock_acquire_wait "$SEED_TASK_SET_LOCK" || return 1
@@ -984,7 +986,7 @@ seed_home() {
   validate_registry
   SEED_COMMITTED=1
   seed_registry_lock_release
-  trap - EXIT
+  trap - EXIT INT TERM
   rm -rf -- "$SEED_BACKUP_DIR"
   printf 'home=%s\n' "$home"
 }

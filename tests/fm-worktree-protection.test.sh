@@ -362,10 +362,73 @@ test_unverified_backend_refuses_uncertain_process() {
   pass "unverified backend refuses uncertain worktree process occupancy"
 }
 
+test_raw_shell_harness_distinguishes_idle_endpoint() {
+  local out record idle_fifo raw_fifo _
+  HOME_DIR="$TMP_ROOT/raw-shell-home"
+  PROJECT_DIR="$TMP_ROOT/raw-shell-project"
+  WORKTREE_DIR="$TMP_ROOT/raw-shell-worktree"
+  FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/raw-shell-fake")
+  mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
+    "$HOME_DIR/config"
+  fm_git_worktree "$PROJECT_DIR" "$WORKTREE_DIR" raw-shell-live
+  fm_write_meta "$HOME_DIR/state/raw-shell-task.meta" \
+    'window=raw-shell-endpoint' "worktree=$WORKTREE_DIR" \
+    "project=$PROJECT_DIR" 'harness=bash' 'kind=ship' 'backend=zellij'
+  idle_fifo="$TMP_ROOT/raw-shell-idle.fifo"
+  raw_fifo="$TMP_ROOT/raw-shell-active.fifo"
+  mkfifo "$idle_fifo" "$raw_fifo"
+  exec 8<> "$idle_fifo"
+  exec 9<> "$raw_fifo"
+  bash -c 'cd "$1" || exit 1; exec bash --noprofile --norc' \
+    fm-test-idle-shell "$WORKTREE_DIR" <&8 >/dev/null 2>&1 &
+  SHELL_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$SHELL_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+    sleep 0.05
+  done
+
+  out=$(run_bootstrap)
+  assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
+    "idle endpoint shell made a shell-named raw harness uncertain"
+  record="$HOME_DIR/state/.worktree-protection/raw-shell-task.protection"
+  assert_grep 'mode=durable' "$record" \
+    "idle endpoint shell was misclassified as a live raw agent"
+
+  bash -lc 'cd "$1" || exit 1; read -r _ < "$2"' \
+    fm-test-raw-shell "$WORKTREE_DIR" "$raw_fifo" <&9 >/dev/null 2>&1 &
+  AGENT_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$AGENT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+    sleep 0.05
+  done
+  out=$(run_bootstrap)
+  assert_contains "$out" 'WORKTREE_PROTECTION: task raw-shell-task: skipped: cannot attribute worktree process' \
+    "active shell-named raw harness did not fail protection loudly"
+  assert_grep 'mode=durable' "$record" \
+    "uncertain shell-named raw harness discarded its existing durable exclusion"
+
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
+  out=$(run_bootstrap)
+  assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
+    "raw shell exit did not restore quiescent protection"
+  assert_grep 'mode=durable' "$record" \
+    "raw shell exit did not transition to durable protection"
+  kill "$SHELL_PID" 2>/dev/null || true
+  wait "$SHELL_PID" 2>/dev/null || true
+  SHELL_PID=
+  exec 8>&-
+  exec 9>&-
+  rm -f "$idle_fifo" "$raw_fifo"
+  pass "raw shell harness distinguishes idle endpoint from uncertain work"
+}
+
 test_bootstrap_splits_durable_and_presence_protection
 test_bootstrap_skips_plain_clone_worktree
 test_bootstrap_protects_symlinked_treehouse_root
 test_unverified_backends_use_structural_agent_occupancy
 test_unverified_backend_refuses_uncertain_process
+test_raw_shell_harness_distinguishes_idle_endpoint
 
 echo "# all fm-worktree-protection tests passed"

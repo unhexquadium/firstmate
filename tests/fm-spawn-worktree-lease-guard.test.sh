@@ -89,7 +89,11 @@ case "${1:-}" in
         done
         [ -e "$FM_FAKE_BLOCK_RELEASE" ] || exit 44
       else
-        sleep 2
+        wait_count=0
+        while [ "$wait_count" -lt 200 ]; do
+          sleep 0.05
+          wait_count=$((wait_count + 1))
+        done
       fi
     fi
     printf '%s\n' "$path"
@@ -304,6 +308,7 @@ test_unpublished_lease_is_returned_on_abort() {
 
 test_interrupted_acquisition_reaps_barrier() {
   local rec id spawn_pid barrier_pid barrier_identity current_identity status _
+  local treehouse_identity current_treehouse_identity
   id=lease-interrupt-r5
   rec=$(make_case interrupt "$id")
   read_case_record "$rec"
@@ -338,13 +343,20 @@ test_interrupted_acquisition_reaps_barrier() {
   done
   [ -s "$CASE_DIR/barrier.pid" ] || fail "blocked acquisition did not expose its cwd barrier"
   BLOCKED_TREEHOUSE_PID=$(cat "$CASE_DIR/block-ready")
+  treehouse_identity=$(fm_test_pid_identity "$BLOCKED_TREEHOUSE_PID") \
+    || fail "blocked Treehouse acquisition child was not alive"
   barrier_pid=$(cat "$CASE_DIR/barrier.pid")
   BLOCKED_BARRIER_PID=$barrier_pid
   barrier_identity=$(fm_test_pid_identity "$barrier_pid") \
     || fail "blocked acquisition barrier was not alive"
 
   kill -TERM "$spawn_pid" 2>/dev/null || fail "could not interrupt blocked spawn"
-  kill -TERM "$BLOCKED_TREEHOUSE_PID" 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    kill -0 "$spawn_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  kill -0 "$spawn_pid" 2>/dev/null \
+    && fail "public spawn did not terminate its active Treehouse acquisition child"
   if wait "$spawn_pid"; then
     status=0
   else
@@ -353,6 +365,9 @@ test_interrupted_acquisition_reaps_barrier() {
   BLOCKED_SPAWN_PID=
   BLOCKED_TREEHOUSE_PID=
   [ "$status" -ne 0 ] || fail "interrupted spawn reported success"
+  current_treehouse_identity=$(fm_test_pid_identity "$BLOCKED_TREEHOUSE_PID" 2>/dev/null || true)
+  [ "$current_treehouse_identity" != "$treehouse_identity" ] \
+    || fail "public spawn interruption left its Treehouse acquisition child alive"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     current_identity=$(fm_test_pid_identity "$barrier_pid" 2>/dev/null || true)
     [ "$current_identity" != "$barrier_identity" ] && break
