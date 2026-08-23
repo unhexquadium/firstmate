@@ -40,7 +40,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# Treehouse help advertises every required API when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -65,14 +65,28 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
-    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
-  else
-    printf '%s\n' 'Usage: treehouse get'
-  fi
-  exit 0
-fi
+lease=${FM_FAKE_TREEHOUSE_LEASE_HELP:-0}
+holder=${FM_FAKE_TREEHOUSE_HOLDER_HELP:-$lease}
+status_json=${FM_FAKE_TREEHOUSE_STATUS_JSON_HELP:-$lease}
+conditional_return=${FM_FAKE_TREEHOUSE_CONDITIONAL_RETURN_HELP:-$lease}
+case "${1:-}:${2:-}" in
+  get:--help)
+    out='Usage: treehouse get'
+    [ "$lease" = 1 ] && out="$out [--lease]"
+    [ "$holder" = 1 ] && out="$out [--lease-holder <holder>]"
+    printf '%s\n' "$out"
+    ;;
+  status:--help)
+    out='Usage: treehouse status'
+    [ "$status_json" = 1 ] && out="$out [--json]"
+    printf '%s\n' "$out"
+    ;;
+  return:--help)
+    out='Usage: treehouse return'
+    [ "$conditional_return" = 1 ] && out="$out [--if-lease-holder <holder>]"
+    printf '%s\n' "$out"
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -297,8 +311,8 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+treehouse required APIs are accepted silently^1^0.2.4^1^manual^empty^^
+treehouse without required APIs reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
@@ -309,6 +323,29 @@ manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSI
 manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
+}
+
+test_treehouse_required_api_probe() {
+  local case_dir fakebin out label holder status_json conditional_return
+  case_dir="$TMP_ROOT/treehouse-required-apis"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  while IFS='|' read -r label holder status_json conditional_return; do
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+      FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      FM_FAKE_TREEHOUSE_HOLDER_HELP="$holder" \
+      FM_FAKE_TREEHOUSE_STATUS_JSON_HELP="$status_json" \
+      FM_FAKE_TREEHOUSE_CONDITIONAL_RETURN_HELP="$conditional_return" \
+      "$ROOT/bin/fm-bootstrap.sh")
+    assert_contains "$out" "MISSING: treehouse" \
+      "$label did not make bootstrap reject the incompatible Treehouse"
+  done <<'ROWS'
+missing get lease-holder|0|1|1
+missing status json|1|0|1
+missing conditional return|1|1|0
+ROWS
+  pass "bootstrap requires every Treehouse API used by worktree protection"
 }
 
 test_no_mistakes_min_version() {
@@ -894,7 +931,7 @@ test_network_phase_partitions_the_run() {
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/chrome-devtools-axi"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -903,18 +940,18 @@ SH
 
   all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
+  assert_contains "$all_out" "MISSING: chrome-devtools-axi (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
   skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
+  assert_contains "$skip_out" "MISSING: chrome-devtools-axi (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
   only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
-  assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
+  assert_not_contains "$only_out" "MISSING: chrome-devtools-axi" "the network half repeated the local half's work"
 
   combined=$(printf '%s\n%s\n' "$skip_out" "$only_out" | LC_ALL=C sort)
   [ "$combined" = "$(printf '%s\n' "$all_out" | LC_ALL=C sort)" ] \
@@ -1163,6 +1200,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_treehouse_required_api_probe
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

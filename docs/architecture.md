@@ -164,7 +164,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 `fm-spawn.sh` takes a durable Treehouse lease before creating a session-provider endpoint and cross-checks every returned path against all task metadata in the active home.
 Before Treehouse can acquire or reset a path, spawn installs verified cwd barriers for every worktree recorded in task metadata; any unexpected collision stays leased as a repair for the recorded owner while a bounded redraw seeks another directory.
-Locked bootstrap registers durable exclusions for quiescent legacy pool worktrees and identity-bound long-lived cwd guards for occupied ones.
+Locked bootstrap registers durable exclusions for proven-quiescent legacy pool worktrees and identity-bound long-lived cwd guards for proven agent-occupied ones, using backend agent state where verified and a recorded-harness process classifier for Zellij and cmux while refusing uncertain occupancy.
 `bin/fm-worktree-lease-lib.sh` owns those acquisition, redraw, rollback, durable-exclusion, and presence-guard mechanics.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.

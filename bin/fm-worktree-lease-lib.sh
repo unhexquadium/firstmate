@@ -22,6 +22,9 @@
 # WORKTREE_PROTECTION diagnostics only when a recorded Treehouse worktree cannot
 # be inspected or protected; successful and non-Treehouse records stay silent.
 
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+
 # shellcheck disable=SC2034 # Read by fm-spawn after acquisition returns.
 FM_TREEHOUSE_LEASE_PATH=
 FM_TREEHOUSE_COLLISION_OWNER=
@@ -33,6 +36,8 @@ FM_WORKTREE_GUARD_IDENTITY=
 FM_WORKTREE_PROTECTION_ERROR=
 FM_WORKTREE_PROTECTION_MODE=
 FM_WORKTREE_PROTECTION_WORKTREE=
+FM_WORKTREE_PROCESS_COMM=
+FM_WORKTREE_PROCESS_ARGS=
 
 fm_worktree_real_or_raw() {  # <path>
   local path=$1
@@ -395,11 +400,154 @@ fm_worktree_durable_exclusion_register() {  # <record> <worktree>
   fi
 }
 
-fm_worktree_meta_protection_mode() {  # <meta> -> sets mode and worktree globals
-  local meta=$1 pool_status result status backend target agent_state
+fm_worktree_process_snapshot() {  # <pid>
+  local pid=$1 comm args
+  FM_WORKTREE_PROCESS_COMM=
+  FM_WORKTREE_PROCESS_ARGS=
+  comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || return 1
+  args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || return 1
+  comm=${comm#"${comm%%[![:space:]]*}"}
+  args=${args#"${args%%[![:space:]]*}"}
+  [ -n "$comm" ] || return 1
+  FM_WORKTREE_PROCESS_COMM=$comm
+  FM_WORKTREE_PROCESS_ARGS=$args
+}
+
+fm_worktree_process_is_shell() {  # <comm>
+  local comm=$1 base
+  base=${comm##*/}
+  base=${base#-}
+  case "$base" in
+    bash|zsh|sh|dash|ash|ksh|mksh|tcsh|csh|fish) return 0 ;;
+  esac
+  return 1
+}
+
+fm_worktree_process_matches_harness() {  # <comm> <args> <harness>
+  local comm=$1 args=$2 harness=$3 base argv0 argv0_base name
+  base=${comm##*/}
+  base=${base#-}
+  argv0=${args%%[[:space:]]*}
+  argv0_base=${argv0##*/}
+  argv0_base=${argv0_base#-}
+  if [ "$harness" = cursor ]; then
+    fm_cursor_process_matches "$comm" "$args" "$argv0"
+    return
+  fi
+  case "$harness:$base:$argv0_base" in
+    muse:muse:*|muse:muse-bin-*:*|muse:*:muse|muse:*:muse-bin-*) return 0 ;;
+    pi:pi:*|pi:Pi:*|pi:pi-signed:*|pi:pi-launcher:*|\
+    pi:*:pi|pi:*:Pi|pi:*:pi-signed|pi:*:pi-launcher|\
+    pi-signed:pi:*|pi-signed:Pi:*|pi-signed:pi-signed:*|pi-signed:pi-launcher:*|\
+    pi-signed:*:pi|pi-signed:*:Pi|pi-signed:*:pi-signed|pi-signed:*:pi-launcher) return 0 ;;
+  esac
+  if [ "$base" = "$harness" ] || [ "$argv0_base" = "$harness" ]; then
+    return 0
+  fi
+  fm_harness_process_matches "$comm" "$args" || return 1
+  case "$harness:$base" in
+    claude:*claude*|codex:*codex*|opencode:*opencode*|grok:*grok*|kimi:*kimi*) return 0 ;;
+    pi:pi|pi:Pi|pi:pi-signed|pi:pi-launcher|pi-signed:pi|pi-signed:Pi|pi-signed:pi-signed|pi-signed:pi-launcher) return 0 ;;
+  esac
+  if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
+    [ "$name" = "$harness" ] && return 0
+    case "$harness:$name" in pi:pi-signed|pi-signed:pi) return 0 ;; esac
+  fi
+  case "$comm" in
+    *node*|*python*)
+      case "$args" in *"$harness"*) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+
+fm_worktree_structural_protection_mode() {  # <meta> <process-pids> <protection-dir>
+  local meta=$1 process_pids=$2 protection_dir=$3 harness record guard_pid pid
+  local ignored_pids=$'\n' agent_found=0 uncertain_pid= cwd
+  harness=$(fm_meta_get "$meta" harness)
+  [ -n "$harness" ] || {
+    FM_WORKTREE_PROTECTION_ERROR="recorded worktree has no harness identity: $FM_WORKTREE_PROTECTION_WORKTREE"
+    return 2
+  }
+  if [ -d "$protection_dir" ] && [ ! -L "$protection_dir" ]; then
+    for record in "$protection_dir"/*.protection; do
+      [ -f "$record" ] && [ ! -L "$record" ] || continue
+      fm_worktree_protection_record_matches \
+        "$record" presence "$FM_WORKTREE_PROTECTION_WORKTREE" || continue
+      guard_pid=$(fm_worktree_protection_record_value "$record" pid)
+      ignored_pids="${ignored_pids}${guard_pid}"$'\n'
+    done
+  fi
+  while IFS= read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    case "$ignored_pids" in *$'\n'"$pid"$'\n'*) continue ;; esac
+    fm_worktree_process_snapshot "$pid" || continue
+    cwd=$(fm_worktree_process_cwd "$pid" 2>/dev/null) || continue
+    cwd=$(fm_worktree_real_or_raw "$cwd")
+    case "$cwd" in
+      "$FM_WORKTREE_PROTECTION_WORKTREE"|"$FM_WORKTREE_PROTECTION_WORKTREE"/*) ;;
+      *) continue ;;
+    esac
+    if fm_worktree_process_matches_harness \
+      "$FM_WORKTREE_PROCESS_COMM" "$FM_WORKTREE_PROCESS_ARGS" "$harness"; then
+      agent_found=1
+      continue
+    fi
+    fm_worktree_process_is_shell "$FM_WORKTREE_PROCESS_COMM" && continue
+    uncertain_pid=$pid
+  done <<< "$process_pids"
+  if [ "$agent_found" -eq 1 ]; then
+    FM_WORKTREE_PROTECTION_MODE=presence
+    return 0
+  fi
+  if [ -n "$uncertain_pid" ]; then
+    FM_WORKTREE_PROTECTION_ERROR="cannot attribute worktree process $uncertain_pid to recorded harness $harness: $FM_WORKTREE_PROTECTION_WORKTREE"
+    return 2
+  fi
+  FM_WORKTREE_PROTECTION_MODE=durable
+}
+
+fm_worktree_meta_protection_mode() {  # <meta> <protection-dir> -> sets mode and worktree globals
+  local meta=$1 protection_dir=$2 pool_status result membership process_pids status backend target agent_state
+  local inspection_root membership_status
   FM_WORKTREE_PROTECTION_MODE=
   fm_worktree_meta_local_path "$meta" || return $?
-  if ! pool_status=$(CDPATH='' cd -- "$FM_WORKTREE_PROTECTION_WORKTREE" \
+  inspection_root=$(git -C "$FM_WORKTREE_PROTECTION_WORKTREE" worktree list --porcelain 2>/dev/null \
+    | sed -n 's/^worktree //p' | head -n 1)
+  if [ -n "$inspection_root" ] && [ -d "$inspection_root" ]; then
+    inspection_root=$(fm_worktree_real_or_raw "$inspection_root")
+  fi
+  if [ -z "$inspection_root" ] || [ "$inspection_root" = "$FM_WORKTREE_PROTECTION_WORKTREE" ]; then
+    if ! membership_status=$(CDPATH='' cd -- "$FM_WORKTREE_PROTECTION_WORKTREE" \
+      && treehouse status --json 2>/dev/null); then
+      FM_WORKTREE_PROTECTION_ERROR="treehouse status failed for recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
+      return 2
+    fi
+    if printf '%s\n' "$membership_status" | node -e '
+      const fs = require("fs");
+      const path = process.argv[1];
+      let rows;
+      try { rows = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
+      if (!Array.isArray(rows)) process.exit(2);
+      process.exit(rows.some((row) => row && row.path === path) ? 0 : 3);
+    ' "$FM_WORKTREE_PROTECTION_WORKTREE" 2>/dev/null; then
+      status=0
+    else
+      status=$?
+    fi
+    case "$status" in
+      3) return 1 ;;
+      0)
+        FM_WORKTREE_PROTECTION_ERROR="could not resolve an inspection root outside recorded Treehouse worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
+        return 2
+        ;;
+      *)
+        FM_WORKTREE_PROTECTION_ERROR="treehouse status returned invalid JSON for recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
+        return 2
+        ;;
+    esac
+  fi
+  if ! pool_status=$(CDPATH='' cd -- "$inspection_root" \
     && treehouse status --json 2>/dev/null); then
     FM_WORKTREE_PROTECTION_ERROR="treehouse status failed for recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
     return 2
@@ -416,7 +564,11 @@ fm_worktree_meta_protection_mode() {  # <meta> -> sets mode and worktree globals
       process.stdout.write("none");
       process.exit(0);
     }
-    process.stdout.write("unleased");
+    if (!Array.isArray(row.processes)) process.exit(2);
+    for (const process of row.processes) {
+      if (!process || !Number.isInteger(process.pid)) process.exit(2);
+    }
+    process.stdout.write(["unleased", ...row.processes.map((process) => process.pid)].join("\n"));
   ' "$FM_WORKTREE_PROTECTION_WORKTREE" 2>/dev/null)
   status=$?
   case "$status" in
@@ -427,19 +579,28 @@ fm_worktree_meta_protection_mode() {  # <meta> -> sets mode and worktree globals
       return 2
       ;;
   esac
-  if [ "$result" = none ]; then
+  membership=${result%%$'\n'*}
+  if [ "$membership" = none ]; then
     FM_WORKTREE_PROTECTION_MODE=none
     return 0
   fi
+  process_pids=
+  case "$result" in *$'\n'*) process_pids=${result#*$'\n'} ;; esac
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) \
     || agent_state=unreadable
-  if [ "$agent_state" = alive ]; then
-    FM_WORKTREE_PROTECTION_MODE=presence
-  else
-    FM_WORKTREE_PROTECTION_MODE=durable
-  fi
+  case "$backend:$agent_state" in
+    *:alive) FM_WORKTREE_PROTECTION_MODE=presence ;;
+    *:dead|*:missing) FM_WORKTREE_PROTECTION_MODE=durable ;;
+    zellij:unverified|cmux:unverified)
+      fm_worktree_structural_protection_mode "$meta" "$process_pids" "$protection_dir"
+      ;;
+    *)
+      FM_WORKTREE_PROTECTION_ERROR="backend $backend could not determine agent occupancy ($agent_state): $FM_WORKTREE_PROTECTION_WORKTREE"
+      return 2
+      ;;
+  esac
 }
 
 fm_worktree_protection_sweep() {  # <state-dir>
@@ -465,7 +626,7 @@ fm_worktree_protection_sweep() {  # <state-dir>
     mode=
     if [ -f "$meta" ] && [ ! -L "$meta" ]; then
       FM_WORKTREE_PROTECTION_ERROR=
-      if fm_worktree_meta_protection_mode "$meta" 2>/dev/null; then
+      if fm_worktree_meta_protection_mode "$meta" "$protection_dir" 2>/dev/null; then
         status=0
       else
         status=$?
@@ -501,7 +662,7 @@ fm_worktree_protection_sweep() {  # <state-dir>
         ;;
     esac
     FM_WORKTREE_PROTECTION_ERROR=
-    if fm_worktree_meta_protection_mode "$meta"; then
+    if fm_worktree_meta_protection_mode "$meta" "$protection_dir"; then
       status=0
       worktree=$FM_WORKTREE_PROTECTION_WORKTREE
       mode=$FM_WORKTREE_PROTECTION_MODE

@@ -14,6 +14,8 @@ BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worktree-protection)
 GUARD_PID=
 AGENT_PID=
+SHELL_PID=
+UNKNOWN_PID=
 
 cleanup_guard() {
   if [ -n "$GUARD_PID" ]; then
@@ -21,6 +23,12 @@ cleanup_guard() {
   fi
   if [ -n "$AGENT_PID" ]; then
     kill "$AGENT_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SHELL_PID" ]; then
+    kill "$SHELL_PID" 2>/dev/null || true
+  fi
+  if [ -n "$UNKNOWN_PID" ]; then
+    kill "$UNKNOWN_PID" 2>/dev/null || true
   fi
   fm_test_cleanup
 }
@@ -57,6 +65,9 @@ case "${1:-}" in
     ;;
   status)
     [ "${2:-}" = --json ] || exit 1
+    if [ -n "${FM_FAKE_TREEHOUSE_STATUS_CWDS:-}" ]; then
+      pwd -P >> "$FM_FAKE_TREEHOUSE_STATUS_CWDS"
+    fi
     if [ "${FM_FAKE_TREEHOUSE_MEMBER:-1}" = 0 ]; then
       printf '[]\n'
       exit 0
@@ -101,6 +112,7 @@ run_bootstrap() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_PATH="$WORKTREE_DIR" \
+    FM_FAKE_TREEHOUSE_STATUS_CWDS="$HOME_DIR/treehouse-status-cwds" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$BOOTSTRAP" 2>&1
 }
@@ -142,6 +154,8 @@ test_bootstrap_splits_durable_and_presence_protection() {
     "quiescent worktree did not receive durable protection"
   assert_no_grep 'pid=' "$record" \
     "quiescent worktree was relaxed to a process-presence guard"
+  [ "$(tail -n 1 "$HOME_DIR/treehouse-status-cwds")" = "$PROJECT_DIR" ] \
+    || fail "bootstrap inspected occupancy from inside the candidate worktree"
 
   bash -c 'cd "$1" || exit 1; exec sleep 2147483647' \
     fm-test-endpoint-shell "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
@@ -227,7 +241,99 @@ test_bootstrap_skips_plain_clone_worktree() {
   pass "bootstrap silently excludes plain-clone secondmate homes from pool protection"
 }
 
+test_unverified_backends_use_structural_agent_occupancy() {
+  local backend out record first_pid fifo _
+  for backend in zellij cmux; do
+    HOME_DIR="$TMP_ROOT/$backend-home"
+    PROJECT_DIR="$TMP_ROOT/$backend-project"
+    WORKTREE_DIR="$TMP_ROOT/$backend-worktree"
+    FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/$backend-fake")
+    mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
+      "$HOME_DIR/config"
+    fm_git_worktree "$PROJECT_DIR" "$WORKTREE_DIR" "$backend-live"
+    fm_write_meta "$HOME_DIR/state/$backend-task.meta" \
+      "window=$backend-endpoint" "worktree=$WORKTREE_DIR" \
+      "project=$PROJECT_DIR" 'harness=codex' 'kind=ship' "backend=$backend"
+    fifo="$TMP_ROOT/$backend-shell.fifo"
+    mkfifo "$fifo"
+    bash -c 'cd "$1" || exit 1; read -r _ < "$2"' \
+      fm-test-shell "$WORKTREE_DIR" "$fifo" </dev/null >/dev/null 2>&1 &
+    SHELL_PID=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ "$(readlink "/proc/$SHELL_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+      sleep 0.05
+    done
+
+    out=$(run_bootstrap)
+    assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
+      "$backend idle shell made structural occupancy uncertain"
+    record="$HOME_DIR/state/.worktree-protection/$backend-task.protection"
+    assert_grep 'mode=durable' "$record" \
+      "$backend idle shell was classified as a live agent"
+
+    bash -c 'cd "$1" || exit 1; exec -a codex sleep 2147483647' \
+      fm-test-agent "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
+    AGENT_PID=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ "$(readlink "/proc/$AGENT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+      sleep 0.05
+    done
+    run_bootstrap >/dev/null
+    assert_grep 'mode=presence' "$record" \
+      "$backend live recorded harness did not receive presence protection"
+    first_pid=$(sed -n 's/^pid=//p' "$record")
+    GUARD_PID=$first_pid
+
+    kill "$AGENT_PID" 2>/dev/null || true
+    wait "$AGENT_PID" 2>/dev/null || true
+    AGENT_PID=
+    run_bootstrap >/dev/null
+    assert_grep 'mode=durable' "$record" \
+      "$backend worktree did not become durable after its real agent exited"
+    assert_guard_stops "$first_pid"
+    GUARD_PID=
+    kill "$SHELL_PID" 2>/dev/null || true
+    wait "$SHELL_PID" 2>/dev/null || true
+    SHELL_PID=
+    rm -f "$fifo"
+  done
+  pass "unverified backends structurally distinguish live agents from idle shells"
+}
+
+test_unverified_backend_refuses_uncertain_process() {
+  local out
+  HOME_DIR="$TMP_ROOT/uncertain-home"
+  PROJECT_DIR="$TMP_ROOT/uncertain-project"
+  WORKTREE_DIR="$TMP_ROOT/uncertain-worktree"
+  FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/uncertain-fake")
+  mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
+    "$HOME_DIR/config"
+  fm_git_worktree "$PROJECT_DIR" "$WORKTREE_DIR" uncertain-live
+  fm_write_meta "$HOME_DIR/state/uncertain-task.meta" \
+    'window=uncertain-endpoint' "worktree=$WORKTREE_DIR" \
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship' 'backend=zellij'
+  bash -c 'cd "$1" || exit 1; exec sleep 2147483647' \
+    fm-test-unknown "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
+  UNKNOWN_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$UNKNOWN_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+    sleep 0.05
+  done
+
+  out=$(run_bootstrap)
+  assert_contains "$out" 'WORKTREE_PROTECTION: task uncertain-task: skipped: cannot attribute worktree process' \
+    "unattributable worktree process did not fail protection loudly"
+  assert_absent "$HOME_DIR/state/.worktree-protection/uncertain-task.protection" \
+    "unattributable worktree process was silently recorded as quiescent"
+  kill "$UNKNOWN_PID" 2>/dev/null || true
+  wait "$UNKNOWN_PID" 2>/dev/null || true
+  UNKNOWN_PID=
+  pass "unverified backend refuses uncertain worktree process occupancy"
+}
+
 test_bootstrap_splits_durable_and_presence_protection
 test_bootstrap_skips_plain_clone_worktree
+test_unverified_backends_use_structural_agent_occupancy
+test_unverified_backend_refuses_uncertain_process
 
 echo "# all fm-worktree-protection tests passed"

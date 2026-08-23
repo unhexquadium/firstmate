@@ -807,8 +807,17 @@ NO_MISTAKES_MIN=1.31.2
 GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.46
 
-treehouse_supports_lease() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+treehouse_help_has_flag() {
+  local command=$1 flag=$2
+  treehouse "$command" --help 2>&1 \
+    | grep -Eq "(^|[^[:alnum:]_-])${flag}([^[:alnum:]_-]|$)"
+}
+
+treehouse_supports_required_apis() {
+  treehouse_help_has_flag get --lease \
+    && treehouse_help_has_flag get --lease-holder \
+    && treehouse_help_has_flag status --json \
+    && treehouse_help_has_flag return --if-lease-holder
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that
@@ -1149,11 +1158,11 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
+  # The treehouse API-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_required_apis; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
