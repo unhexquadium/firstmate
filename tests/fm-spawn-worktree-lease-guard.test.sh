@@ -10,6 +10,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-lease-guard)
 BLOCKED_SPAWN_PID=
 BLOCKED_TREEHOUSE_PID=
@@ -80,7 +81,16 @@ case "${1:-}" in
       worktree_pids "${FM_FAKE_PROTECTED_PATH:?FM_FAKE_PROTECTED_PATH unset}" \
         | head -n 1 > "${FM_FAKE_BARRIER_PID_FILE:?FM_FAKE_BARRIER_PID_FILE unset}"
       printf '%s\n' "$$" > "${FM_FAKE_BLOCK_READY:?FM_FAKE_BLOCK_READY unset}"
-      sleep 2
+      if [ -n "${FM_FAKE_BLOCK_RELEASE:-}" ]; then
+        wait_count=0
+        while [ ! -e "$FM_FAKE_BLOCK_RELEASE" ] && [ "$wait_count" -lt 200 ]; do
+          sleep 0.05
+          wait_count=$((wait_count + 1))
+        done
+        [ -e "$FM_FAKE_BLOCK_RELEASE" ] || exit 44
+      else
+        sleep 2
+      fi
     fi
     printf '%s\n' "$path"
     ;;
@@ -101,7 +111,20 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/no-mistakes" \
+    "$fakebin/gh-axi" "$fakebin/gh"
   printf '%s\n' "$fakebin"
 }
 
@@ -344,11 +367,88 @@ test_interrupted_acquisition_reaps_barrier() {
   pass "an interrupted acquisition reaps its temporary cwd barrier"
 }
 
+test_teardown_cannot_race_one_slot_acquisition() {
+  local rec id owner spawn_pid teardown_out teardown_status spawn_status _
+  id=lease-teardown-race-r7
+  owner=live-owner
+  rec=$(make_case teardown-race "$id")
+  read_case_record "$rec"
+  fm_write_meta "$HOME_DIR/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$COLLISION_DIR" "project=$PROJECT_DIR" \
+    'harness=codex' 'kind=ship' 'mode=local-only'
+  : > "$CASE_DIR/treehouse.log"
+  printf '%s\n' "$COLLISION_DIR" > "$CASE_DIR/treehouse.sequence"
+  printf '%s\n' "$COLLISION_DIR" > "$CASE_DIR/protected-paths"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$COLLISION_DIR" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" FM_FAKE_BLOCK_GET=1 \
+    FM_FAKE_BLOCK_READY="$CASE_DIR/block-ready" \
+    FM_FAKE_BLOCK_RELEASE="$CASE_DIR/block-release" \
+    FM_FAKE_BARRIER_PID_FILE="$CASE_DIR/barrier.pid" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off \
+    >"$CASE_DIR/spawn.out" 2>&1 &
+  spawn_pid=$!
+  BLOCKED_SPAWN_PID=$spawn_pid
+  for _ in $(seq 1 100); do
+    [ -s "$CASE_DIR/block-ready" ] && [ -s "$CASE_DIR/barrier.pid" ] && break
+    sleep 0.05
+  done
+  [ -s "$CASE_DIR/block-ready" ] || fail "one-slot acquisition did not reach its blocked Treehouse draw"
+  BLOCKED_TREEHOUSE_PID=$(cat "$CASE_DIR/block-ready")
+  BLOCKED_BARRIER_PID=$(cat "$CASE_DIR/barrier.pid")
+
+  teardown_out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
+    PATH="$FAKEBIN_DIR:$PATH" "$TEARDOWN" "$owner" --force 2>&1)
+  teardown_status=$?
+  [ "$teardown_status" -ne 0 ] \
+    || fail "teardown raced a blocked one-slot acquisition"
+  assert_contains "$teardown_out" "task set is locked by another operation" \
+    "concurrent teardown did not fail at the shared task-set boundary"
+  assert_grep "worktree=$COLLISION_DIR" "$HOME_DIR/state/$owner.meta" \
+    "concurrent teardown removed the collision owner's metadata"
+  assert_no_grep '^return ' "$CASE_DIR/treehouse.log" \
+    "concurrent teardown returned the collision path while acquisition was active"
+
+  : > "$CASE_DIR/block-release"
+  if wait "$spawn_pid"; then
+    spawn_status=0
+  else
+    spawn_status=$?
+  fi
+  BLOCKED_SPAWN_PID=
+  BLOCKED_TREEHOUSE_PID=
+  BLOCKED_BARRIER_PID=
+  [ "$spawn_status" -ne 0 ] || fail "one-slot spawn accepted its recorded collision"
+  assert_contains "$(cat "$CASE_DIR/spawn.out")" "repeated recorded live task worktree" \
+    "one-slot acquisition did not terminate loudly after the protected collision repeated"
+  assert_grep "worktree=$COLLISION_DIR" "$HOME_DIR/state/$owner.meta" \
+    "collision lease was left without its live metadata owner"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "failed one-slot acquisition published new task metadata"
+  assert_absent "$CASE_DIR/preacquire-violation" \
+    "one-slot acquisition reached the recorded path without its cwd barrier"
+  pass "teardown cannot orphan a lease during one-slot acquisition"
+}
+
 test_colliding_lease_is_redrawn
 test_exhausted_redraw_fails_loudly
 test_all_distinct_collisions_allow_safe_draw
 test_non_colliding_lease_is_unaffected
 test_unpublished_lease_is_returned_on_abort
 test_interrupted_acquisition_reaps_barrier
+test_teardown_cannot_race_one_slot_acquisition
 
 echo "# all fm-spawn-worktree-lease-guard tests passed"
