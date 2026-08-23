@@ -80,8 +80,9 @@ case "${1:-}" in
       separator=,
     done < <(worktree_pids "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" | sort -un)
     processes="${processes}]"
+    status_path=${FM_FAKE_TREEHOUSE_STATUS_PATH:-${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}}
     printf '[{"path":"%s","lease_id":"%s","processes":%s}]\n' \
-      "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
+      "$status_path" \
       "${FM_FAKE_TREEHOUSE_LEASE_ID:-}" \
       "$processes"
     ;;
@@ -241,6 +242,36 @@ test_bootstrap_skips_plain_clone_worktree() {
   pass "bootstrap silently excludes plain-clone secondmate homes from pool protection"
 }
 
+test_bootstrap_protects_symlinked_treehouse_root() {
+  local out physical_root symlink_root symlink_worktree record
+  HOME_DIR="$TMP_ROOT/symlink-home"
+  PROJECT_DIR="$TMP_ROOT/symlink-project"
+  physical_root="$TMP_ROOT/treehouse-physical"
+  symlink_root="$TMP_ROOT/treehouse-link"
+  WORKTREE_DIR="$physical_root/pool-worktree"
+  symlink_worktree="$symlink_root/pool-worktree"
+  FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/symlink-fake")
+  mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
+    "$HOME_DIR/config" "$physical_root"
+  ln -s "$physical_root" "$symlink_root"
+  fm_git_worktree "$PROJECT_DIR" "$WORKTREE_DIR" symlink-protection
+  fm_write_meta "$HOME_DIR/state/symlink-task.meta" \
+    'window=firstmate:fm-symlink-task' "worktree=$symlink_worktree" \
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
+
+  out=$(FM_FAKE_TREEHOUSE_STATUS_PATH="$symlink_worktree" run_bootstrap)
+  assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
+    "bootstrap reported a protection failure for a symlinked Treehouse root"
+  record="$HOME_DIR/state/.worktree-protection/symlink-task.protection"
+  assert_present "$record" \
+    "bootstrap skipped a recorded worktree beneath a symlinked Treehouse root"
+  assert_grep 'mode=durable' "$record" \
+    "symlinked Treehouse worktree did not receive durable protection"
+  assert_grep "worktree=$WORKTREE_DIR" "$record" \
+    "symlinked Treehouse worktree protection was not physically normalized"
+  pass "bootstrap protects worktrees beneath symlinked Treehouse roots"
+}
+
 test_unverified_backends_use_structural_agent_occupancy() {
   local backend out record first_pid fifo _
   for backend in zellij cmux; do
@@ -333,6 +364,7 @@ test_unverified_backend_refuses_uncertain_process() {
 
 test_bootstrap_splits_durable_and_presence_protection
 test_bootstrap_skips_plain_clone_worktree
+test_bootstrap_protects_symlinked_treehouse_root
 test_unverified_backends_use_structural_agent_occupancy
 test_unverified_backend_refuses_uncertain_process
 

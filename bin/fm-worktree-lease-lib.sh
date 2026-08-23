@@ -48,6 +48,33 @@ fm_worktree_real_or_raw() {  # <path>
   fi
 }
 
+fm_worktree_treehouse_status_row() {
+  local target=$1
+  node -e '
+    const fs = require("fs");
+    const normalize = (value) => {
+      if (typeof value !== "string") return null;
+      try { return fs.realpathSync(value); } catch { return value; }
+    };
+    const target = normalize(process.argv[1]);
+    let rows;
+    try { rows = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
+    if (!Array.isArray(rows)) process.exit(2);
+    const row = rows.find((candidate) =>
+      candidate && normalize(candidate.path) === target);
+    if (!row) process.exit(3);
+    if (typeof row.lease_id === "string" && row.lease_id) {
+      process.stdout.write("none");
+      process.exit(0);
+    }
+    if (!Array.isArray(row.processes)) process.exit(2);
+    for (const entry of row.processes) {
+      if (!entry || !Number.isInteger(entry.pid)) process.exit(2);
+    }
+    process.stdout.write(["unleased", ...row.processes.map((entry) => entry.pid)].join("\n"));
+  ' "$target"
+}
+
 fm_worktree_collision_owner() {  # <state-dir> <candidate>
   local state=$1 candidate=$2 candidate_real meta recorded recorded_real count
   FM_TREEHOUSE_COLLISION_OWNER=
@@ -523,14 +550,9 @@ fm_worktree_meta_protection_mode() {  # <meta> <protection-dir> -> sets mode and
       FM_WORKTREE_PROTECTION_ERROR="treehouse status failed for recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
       return 2
     fi
-    if printf '%s\n' "$membership_status" | node -e '
-      const fs = require("fs");
-      const path = process.argv[1];
-      let rows;
-      try { rows = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
-      if (!Array.isArray(rows)) process.exit(2);
-      process.exit(rows.some((row) => row && row.path === path) ? 0 : 3);
-    ' "$FM_WORKTREE_PROTECTION_WORKTREE" 2>/dev/null; then
+    if printf '%s\n' "$membership_status" \
+      | fm_worktree_treehouse_status_row "$FM_WORKTREE_PROTECTION_WORKTREE" \
+        >/dev/null 2>&1; then
       status=0
     else
       status=$?
@@ -552,24 +574,8 @@ fm_worktree_meta_protection_mode() {  # <meta> <protection-dir> -> sets mode and
     FM_WORKTREE_PROTECTION_ERROR="treehouse status failed for recorded worktree: $FM_WORKTREE_PROTECTION_WORKTREE"
     return 2
   fi
-  result=$(printf '%s\n' "$pool_status" | node -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    let rows;
-    try { rows = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
-    if (!Array.isArray(rows)) process.exit(2);
-    const row = rows.find((candidate) => candidate && candidate.path === path);
-    if (!row) process.exit(3);
-    if (typeof row.lease_id === "string" && row.lease_id) {
-      process.stdout.write("none");
-      process.exit(0);
-    }
-    if (!Array.isArray(row.processes)) process.exit(2);
-    for (const process of row.processes) {
-      if (!process || !Number.isInteger(process.pid)) process.exit(2);
-    }
-    process.stdout.write(["unleased", ...row.processes.map((process) => process.pid)].join("\n"));
-  ' "$FM_WORKTREE_PROTECTION_WORKTREE" 2>/dev/null)
+  result=$(printf '%s\n' "$pool_status" \
+    | fm_worktree_treehouse_status_row "$FM_WORKTREE_PROTECTION_WORKTREE" 2>/dev/null)
   status=$?
   case "$status" in
     0) ;;
