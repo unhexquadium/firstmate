@@ -509,6 +509,7 @@ SEED_REGISTRY_LOCK=
 SEED_REGISTRY_LOCK_HELD=0
 SEED_TASK_SET_LOCK=
 SEED_TASK_SET_LOCK_HELD=0
+SEED_LEASE_HOLDER=
 
 seed_task_set_lock_release() {
   if [ "$SEED_TASK_SET_LOCK_HELD" -eq 1 ]; then
@@ -590,13 +591,14 @@ seed_rollback_target() {
 }
 
 seed_return_treehouse_home() {
-  local home=$1 abs_home
+  local home=$1 holder=$2 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  fm_treehouse_lease_return_if_holder \
+    "$FM_ROOT" "$abs_home" "$holder" >/dev/null || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
@@ -651,7 +653,7 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME"
+      seed_return_treehouse_home "$SEED_HOME" "$SEED_LEASE_HOLDER"
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -879,10 +881,12 @@ seed_home() {
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
+    SEED_LEASE_HOLDER=$id
     acquire_treehouse_home "$id"
     home=$FM_TREEHOUSE_LEASE_PATH
-    seed_task_set_lock_release
     SEED_HOME="$home"
+    fm_treehouse_lease_transfer "$FM_ROOT" "$home" "$id" || return 1
+    seed_task_set_lock_release
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")

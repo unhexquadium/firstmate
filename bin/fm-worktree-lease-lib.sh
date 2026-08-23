@@ -33,6 +33,10 @@ FM_TREEHOUSE_COLLISION_PATH_COUNT=0
 FM_TREEHOUSE_ACQUIRE_GUARDS=
 FM_TREEHOUSE_ACQUIRE_PID=
 FM_TREEHOUSE_ACQUIRE_OUTPUT=
+FM_TREEHOUSE_ACQUIRE_STATE=
+FM_TREEHOUSE_ACQUIRE_PROJECT=
+FM_TREEHOUSE_ACQUIRE_HOLDER=
+FM_TREEHOUSE_PENDING_LEASE_PATH=
 FM_WORKTREE_GUARD_PID=
 FM_WORKTREE_GUARD_IDENTITY=
 FM_WORKTREE_PROTECTION_ERROR=
@@ -226,15 +230,69 @@ fm_treehouse_acquire_barrier_stop() {
 
 fm_treehouse_active_acquire_stop() {
   local pid=$FM_TREEHOUSE_ACQUIRE_PID output=$FM_TREEHOUSE_ACQUIRE_OUTPUT
+  local state=$FM_TREEHOUSE_ACQUIRE_STATE project=$FM_TREEHOUSE_ACQUIRE_PROJECT
+  local holder=$FM_TREEHOUSE_ACQUIRE_HOLDER candidate pending=0 collision_status
   if [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null || true
     sleep 0.1
     kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   fi
+  if [ -n "$FM_TREEHOUSE_PENDING_LEASE_PATH" ]; then
+    candidate=$FM_TREEHOUSE_PENDING_LEASE_PATH
+    pending=1
+  elif [ -n "$output" ] && [ -f "$output" ]; then
+    candidate=$(< "$output")
+  fi
+  if [ -n "$candidate" ] && [ -n "$project" ] && [ -n "$holder" ]; then
+    case "$candidate" in
+      /*$'\n'*|[!/]*|"") ;;
+      /*)
+        if [ "$pending" -eq 1 ]; then
+          fm_treehouse_lease_return_if_holder \
+            "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
+        elif fm_worktree_collision_owner "$state" "$candidate"; then
+          :
+        else
+          collision_status=$?
+          if [ "$collision_status" -eq 1 ]; then
+            fm_treehouse_lease_return_if_holder \
+              "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
+          fi
+        fi
+        ;;
+    esac
+  fi
   FM_TREEHOUSE_ACQUIRE_PID=
   FM_TREEHOUSE_ACQUIRE_OUTPUT=
+  FM_TREEHOUSE_ACQUIRE_STATE=
+  FM_TREEHOUSE_ACQUIRE_PROJECT=
+  FM_TREEHOUSE_ACQUIRE_HOLDER=
+  FM_TREEHOUSE_PENDING_LEASE_PATH=
   [ -z "$output" ] || rm -f -- "$output"
+}
+
+fm_treehouse_acquire_output_clear() {
+  [ -z "$FM_TREEHOUSE_ACQUIRE_OUTPUT" ] \
+    || rm -f -- "$FM_TREEHOUSE_ACQUIRE_OUTPUT"
+  FM_TREEHOUSE_ACQUIRE_OUTPUT=
+}
+
+fm_treehouse_acquire_context_clear() {
+  FM_TREEHOUSE_ACQUIRE_PID=
+  fm_treehouse_acquire_output_clear
+  FM_TREEHOUSE_ACQUIRE_STATE=
+  FM_TREEHOUSE_ACQUIRE_PROJECT=
+  FM_TREEHOUSE_ACQUIRE_HOLDER=
+}
+
+fm_treehouse_lease_transfer() {  # <project-dir> <path> <holder>
+  local project=$1 path=$2 holder=$3
+  [ "$FM_TREEHOUSE_PENDING_LEASE_PATH" = "$path" ] \
+    && [ "$FM_TREEHOUSE_ACQUIRE_PROJECT" = "$project" ] \
+    && [ "$FM_TREEHOUSE_ACQUIRE_HOLDER" = "$holder" ] || return 1
+  FM_TREEHOUSE_PENDING_LEASE_PATH=
+  fm_treehouse_acquire_context_clear
 }
 
 fm_treehouse_acquire_signal_exit() {
@@ -310,16 +368,27 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
   local state=$1 project=$2 holder=$3 attempts attempt=0 candidate candidate_real
   local rejected=0 rejected_paths=$'\n' collision_status acquire_status
   FM_TREEHOUSE_LEASE_PATH=
+  [ -z "$FM_TREEHOUSE_PENDING_LEASE_PATH" ] || {
+    echo "error: a prior Treehouse lease is still awaiting ownership transfer" >&2
+    return 1
+  }
   if ! fm_worktree_collision_path_count "$state"; then
     echo "error: cannot derive the durable Treehouse redraw bound from task metadata: $FM_TREEHOUSE_COLLISION_ERROR" >&2
     return 1
   fi
+  FM_TREEHOUSE_ACQUIRE_STATE=$state
+  FM_TREEHOUSE_ACQUIRE_PROJECT=$project
+  FM_TREEHOUSE_ACQUIRE_HOLDER=$holder
   attempts=$((FM_TREEHOUSE_COLLISION_PATH_COUNT + 1))
-  fm_treehouse_acquire_barrier_start "$state" || return 1
+  fm_treehouse_acquire_barrier_start "$state" || {
+    fm_treehouse_acquire_context_clear
+    return 1
+  }
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
     FM_TREEHOUSE_ACQUIRE_OUTPUT=$(mktemp "$state/.treehouse-acquire.XXXXXX") || {
       fm_treehouse_acquire_barrier_stop
+      fm_treehouse_acquire_context_clear
       echo "error: could not create Treehouse acquisition output under $state" >&2
       return 1
     }
@@ -335,10 +404,10 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     fi
     FM_TREEHOUSE_ACQUIRE_PID=
     candidate=$(< "$FM_TREEHOUSE_ACQUIRE_OUTPUT")
-    rm -f -- "$FM_TREEHOUSE_ACQUIRE_OUTPUT"
-    FM_TREEHOUSE_ACQUIRE_OUTPUT=
     if [ "$acquire_status" -ne 0 ]; then
+      fm_treehouse_acquire_output_clear
       fm_treehouse_acquire_barrier_stop
+      fm_treehouse_acquire_context_clear
       if [ "$rejected" -gt 0 ]; then
         echo "error: treehouse durable lease attempt $attempt failed after rejecting $rejected recorded live task worktree collision(s); could not produce a non-colliding worktree within $attempts attempts" >&2
       else
@@ -350,7 +419,9 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       /*$'\n'*|''|[!/]*)
         [ -z "$candidate" ] || fm_treehouse_lease_return_if_holder \
           "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
+        fm_treehouse_acquire_output_clear
         fm_treehouse_acquire_barrier_stop
+        fm_treehouse_acquire_context_clear
         echo "error: treehouse get --lease returned a non-absolute worktree path: '${candidate:-empty}'" >&2
         return 1
         ;;
@@ -360,7 +431,9 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       candidate_real=$(fm_worktree_real_or_raw "$candidate")
       case "$rejected_paths" in
         *$'\n'"$candidate_real"$'\n'*)
+          fm_treehouse_acquire_output_clear
           fm_treehouse_acquire_barrier_stop
+          fm_treehouse_acquire_context_clear
           echo "error: treehouse repeated recorded live task worktree '$candidate' after rejecting $rejected distinct collision(s); refusing further redraws after $attempt of $attempts bounded attempts" >&2
           return 1
           ;;
@@ -368,22 +441,28 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       rejected_paths="${rejected_paths}${candidate_real}"$'\n'
       rejected=$((rejected + 1))
       echo "warning: treehouse returned pre-excluded recorded live task worktree '$candidate' owned by $FM_TREEHOUSE_COLLISION_OWNER; preserving that durable lease and redrawing ($attempt/$attempts)" >&2
+      fm_treehouse_acquire_output_clear
       continue
     else
       collision_status=$?
       if [ "$collision_status" -eq 2 ]; then
         fm_treehouse_lease_return_if_holder "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
+        fm_treehouse_acquire_output_clear
         fm_treehouse_acquire_barrier_stop
+        fm_treehouse_acquire_context_clear
         echo "error: cannot verify durable Treehouse lease '$candidate' against task metadata: $FM_TREEHOUSE_COLLISION_ERROR" >&2
         return 1
       fi
     fi
+    FM_TREEHOUSE_PENDING_LEASE_PATH=$candidate
+    fm_treehouse_acquire_output_clear
     # shellcheck disable=SC2034 # Read by fm-spawn after this function returns.
     FM_TREEHOUSE_LEASE_PATH=$candidate
     fm_treehouse_acquire_barrier_stop
     return 0
   done
   fm_treehouse_acquire_barrier_stop
+  fm_treehouse_acquire_context_clear
   echo "error: treehouse could not produce a non-colliding worktree after $attempts durable lease attempts; every lease matched a recorded live task worktree in $state" >&2
   return 1
 }

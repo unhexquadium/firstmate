@@ -363,11 +363,11 @@ test_interrupted_acquisition_reaps_barrier() {
     status=$?
   fi
   BLOCKED_SPAWN_PID=
-  BLOCKED_TREEHOUSE_PID=
   [ "$status" -ne 0 ] || fail "interrupted spawn reported success"
   current_treehouse_identity=$(fm_test_pid_identity "$BLOCKED_TREEHOUSE_PID" 2>/dev/null || true)
   [ "$current_treehouse_identity" != "$treehouse_identity" ] \
     || fail "public spawn interruption left its Treehouse acquisition child alive"
+  BLOCKED_TREEHOUSE_PID=
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     current_identity=$(fm_test_pid_identity "$barrier_pid" 2>/dev/null || true)
     [ "$current_identity" != "$barrier_identity" ] && break
@@ -380,6 +380,63 @@ test_interrupted_acquisition_reaps_barrier() {
   assert_absent "$HOME_DIR/state/$id.meta" \
     "interrupted acquisition published task metadata"
   pass "an interrupted acquisition reaps its temporary cwd barrier"
+}
+
+test_post_success_signal_returns_pending_lease() {
+  local rec id helper_pid helper_status _
+  id=lease-pending-signal-r8
+  rec=$(make_case pending-signal "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/treehouse.log"
+  printf '%s\n' "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
+  : > "$CASE_DIR/protected-paths"
+
+  FM_PENDING_TEST_ROOT="$ROOT" FM_PENDING_TEST_STATE="$HOME_DIR/state" \
+    FM_PENDING_TEST_PROJECT="$PROJECT_DIR" FM_PENDING_TEST_HOLDER="fm-$id" \
+    FM_PENDING_TEST_READY="$CASE_DIR/pending-ready" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c '
+      set -u
+      . "$FM_PENDING_TEST_ROOT/bin/fm-wake-lib.sh"
+      . "$FM_PENDING_TEST_ROOT/bin/fm-worktree-lease-lib.sh"
+      trap "fm_treehouse_acquire_signal_exit 130" INT
+      trap "fm_treehouse_acquire_signal_exit 143" TERM
+      fm_treehouse_lease_acquire_noncolliding \
+        "$FM_PENDING_TEST_STATE" "$FM_PENDING_TEST_PROJECT" \
+        "$FM_PENDING_TEST_HOLDER" || exit 1
+      : > "$FM_PENDING_TEST_READY"
+      while :; do sleep 0.05; done
+      fm_treehouse_lease_transfer "$FM_PENDING_TEST_PROJECT" \
+        "$FM_TREEHOUSE_LEASE_PATH" "$FM_PENDING_TEST_HOLDER"
+    ' >"$CASE_DIR/pending.out" 2>&1 &
+  helper_pid=$!
+  BLOCKED_SPAWN_PID=$helper_pid
+  for _ in $(seq 1 100); do
+    [ -e "$CASE_DIR/pending-ready" ] && break
+    kill -0 "$helper_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -e "$CASE_DIR/pending-ready" ] \
+    || fail "pending-lease helper did not reach the ownership-transfer window"
+  kill -TERM "$helper_pid" 2>/dev/null \
+    || fail "could not interrupt the pending-lease helper"
+  if wait "$helper_pid"; then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  BLOCKED_SPAWN_PID=
+  [ "$helper_status" -ne 0 ] || fail "pending-lease interruption reported success"
+  assert_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+    "$CASE_DIR/treehouse.log" \
+    "signal after acquisition success orphaned the pending durable lease"
+  pass "post-success interruption returns the pending durable lease"
 }
 
 test_teardown_cannot_race_one_slot_acquisition() {
@@ -464,6 +521,7 @@ test_all_distinct_collisions_allow_safe_draw
 test_non_colliding_lease_is_unaffected
 test_unpublished_lease_is_returned_on_abort
 test_interrupted_acquisition_reaps_barrier
+test_post_success_signal_returns_pending_lease
 test_teardown_cannot_race_one_slot_acquisition
 
 echo "# all fm-spawn-worktree-lease-guard tests passed"

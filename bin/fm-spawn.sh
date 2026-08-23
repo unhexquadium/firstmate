@@ -1869,6 +1869,8 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     "$STATE" "$PROJ_ABS" "$TREEHOUSE_LEASE_HOLDER" || exit 1
   WT=$FM_TREEHOUSE_LEASE_PATH
   TREEHOUSE_ABORT_CLEANUP=1
+  fm_treehouse_lease_transfer \
+    "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_HOLDER" || exit 1
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a

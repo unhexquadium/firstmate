@@ -357,7 +357,7 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
     fail "seed reused an acquired home marked for another secondmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
-  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+  grep -F "treehouse return --force --if-lease-holder dash $acquired_abs" "$log" >/dev/null \
     || fail "failed acquired seed did not return the home through treehouse"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
@@ -391,7 +391,7 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   grep -F "warning: failed to return treehouse-acquired home $acquired_abs during seed rollback" "$err" >/dev/null \
     || fail "seed rollback did not warn when treehouse return failed"
   [ -f "$lease" ] || fail "failed rollback return did not preserve lease evidence"
-  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+  grep -F "treehouse return --force --if-lease-holder dash $acquired_abs" "$log" >/dev/null \
     || fail "failed rollback did not attempt to return the acquired home"
   pass "home seed rollback warns when treehouse-acquired return fails"
 }
