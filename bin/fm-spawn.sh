@@ -699,7 +699,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? collision_status
   fm_treehouse_acquire_barrier_stop
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
@@ -794,9 +794,24 @@ spawn_abort_cleanup() {
   fi
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
-    if ! fm_treehouse_lease_return_if_id \
-      "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_ID" >/dev/null 2>&1; then
-      echo "warning: could not release unpublished durable Treehouse lease '$WT' for $ID" >&2
+    if [ -n "$FM_TREEHOUSE_ACQUIRE_RECEIPT" ] \
+      && [ -e "$FM_TREEHOUSE_ACQUIRE_RECEIPT" ]; then
+      if fm_treehouse_reconcile_recovery_receipt \
+        "$STATE" "$FM_TREEHOUSE_ACQUIRE_RECEIPT"; then
+        fm_treehouse_recovery_receipt_clear \
+          "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || true
+      else
+        echo "warning: could not reconcile unpublished durable Treehouse lease '$WT' for $ID" >&2
+      fi
+    elif fm_worktree_collision_owner "$STATE" "$WT"; then
+      :
+    else
+      collision_status=$?
+      if [ "$collision_status" -ne 1 ] \
+        || ! fm_treehouse_lease_return_if_id \
+          "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_ID" >/dev/null 2>&1; then
+        echo "warning: could not release unpublished durable Treehouse lease '$WT' for $ID" >&2
+      fi
     fi
   fi
   return "$status"
@@ -2716,6 +2731,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
   # The durable lease now has a task record, so normal teardown owns its return.
   # Before this point the EXIT trap returns only the accepted unpublished lease;
   # collision leases remain held as repairs for the older recorded tasks.
+  if ! fm_treehouse_lease_commit \
+    "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_HOLDER"; then
+    echo "warning: could not retire published Treehouse lease recovery for $ID" >&2
+  fi
   TREEHOUSE_ABORT_CLEANUP=0
 fi
 if [ "$RELAUNCH" -eq 1 ]; then

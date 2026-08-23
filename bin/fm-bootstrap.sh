@@ -1112,6 +1112,21 @@ startup_memory_budget_setup() {
   fi
 }
 
+bootstrap_worktree_protection_sweep() {
+  local lock status=0
+  lock=$(fm_task_set_lock_path "$STATE") || {
+    echo "WORKTREE_PROTECTION: failed: could not resolve task-set lock for $STATE"
+    return 1
+  }
+  if ! fm_lock_try_acquire "$lock"; then
+    echo "WORKTREE_PROTECTION: failed: task set is locked by another operation"
+    return 1
+  fi
+  fm_worktree_protection_sweep "$STATE" || status=$?
+  fm_lock_release "$lock" || status=1
+  return "$status"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1141,7 +1156,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
     # byte-for-byte read-only even when STATE does not exist yet.
     # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
     . "$SCRIPT_DIR/fm-wake-lib.sh"
-    fm_worktree_protection_sweep "$STATE"
+    bootstrap_worktree_protection_sweep
   fi
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup

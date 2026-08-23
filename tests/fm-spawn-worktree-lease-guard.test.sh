@@ -256,7 +256,7 @@ run_spawn() {
     FM_FAKE_UNREADABLE_META="${FM_FAKE_UNREADABLE_META:-}" \
     FM_FAKE_UNREADABLE_META_AFTER="${FM_FAKE_UNREADABLE_META_AFTER:-}" \
     FM_FAKE_UNREADABLE_META_COUNT="${FM_FAKE_UNREADABLE_META_COUNT:-}" \
-    FM_FAKE_LEASE_STATE="${FM_FAKE_LEASE_STATE:-}" \
+    FM_FAKE_LEASE_STATE="${FM_FAKE_LEASE_STATE:-$CASE_DIR/lease-state}" \
     FM_FAKE_UNRELATED_LEASE_STATE="${FM_FAKE_UNRELATED_LEASE_STATE:-}" \
     FM_FAKE_STATUS_FAIL="${FM_FAKE_STATUS_FAIL:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -598,8 +598,8 @@ test_interrupted_acquisition_reaps_barrier() {
   pass "interruption persists and bootstrap reconciles durable cleanup ownership"
 }
 
-test_post_success_signal_returns_pending_lease() {
-  local rec id helper_pid helper_status _
+test_transferred_lease_keeps_recovery_owner() {
+  local rec id helper_pid helper_status receipt bootstrap_out _
   id=lease-pending-signal-r8
   rec=$(make_case pending-signal "$id")
   read_case_record "$rec"
@@ -616,6 +616,7 @@ test_post_success_signal_returns_pending_lease() {
     FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
     FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
     FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
     FM_FAKE_EXPECT_HOLDER="fm-$id" PATH="$FAKEBIN_DIR:$PATH" \
     bash -c '
       set -u
@@ -626,10 +627,10 @@ test_post_success_signal_returns_pending_lease() {
       fm_treehouse_lease_acquire_noncolliding \
         "$FM_PENDING_TEST_STATE" "$FM_PENDING_TEST_PROJECT" \
         "$FM_PENDING_TEST_HOLDER" || exit 1
+      fm_treehouse_lease_transfer "$FM_PENDING_TEST_PROJECT" \
+        "$FM_TREEHOUSE_LEASE_PATH" "$FM_PENDING_TEST_HOLDER" || exit 1
       : > "$FM_PENDING_TEST_READY"
       while :; do sleep 0.05; done
-      fm_treehouse_lease_transfer "$FM_PENDING_TEST_PROJECT" \
-        "$FM_TREEHOUSE_LEASE_PATH" "$FM_PENDING_TEST_HOLDER"
     ' >"$CASE_DIR/pending.out" 2>&1 &
   helper_pid=$!
   BLOCKED_SPAWN_PID=$helper_pid
@@ -640,7 +641,7 @@ test_post_success_signal_returns_pending_lease() {
   done
   [ -e "$CASE_DIR/pending-ready" ] \
     || fail "pending-lease helper did not reach the ownership-transfer window"
-  kill -TERM "$helper_pid" 2>/dev/null \
+  kill -KILL "$helper_pid" 2>/dev/null \
     || fail "could not interrupt the pending-lease helper"
   if wait "$helper_pid"; then
     helper_status=0
@@ -649,10 +650,197 @@ test_post_success_signal_returns_pending_lease() {
   fi
   BLOCKED_SPAWN_PID=
   [ "$helper_status" -ne 0 ] || fail "pending-lease interruption reported success"
+  receipt=$(printf '%s\n' \
+    "$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.acquire."*.receipt)
+  assert_present "$receipt" \
+    "ownership transfer retired recovery before durable publication"
+  assert_no_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
+    "$CASE_DIR/treehouse.log" \
+    "killed ownership transfer returned the lease without recovery"
+
+  bootstrap_out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_LOCKED=1 \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_REAL_CAT="$SYSTEM_CAT" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$bootstrap_out" 'acquisition recovery fm-' \
+    "bootstrap did not reconcile the transferred lease receipt"
+  assert_absent "$receipt" \
+    "bootstrap retained a reconciled transferred lease receipt"
   assert_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
     "$CASE_DIR/treehouse.log" \
-    "signal after acquisition success orphaned the pending durable lease"
-  pass "post-success interruption returns the pending durable lease"
+    "bootstrap did not recover the unpublished transferred lease"
+  pass "ownership transfer retains recovery until durable publication"
+}
+
+test_bootstrap_refuses_active_acquisition() {
+  local rec id spawn_pid bootstrap_out spawn_status receipt _
+  id=lease-bootstrap-lock-r14
+  rec=$(make_case bootstrap-lock "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/treehouse.log"
+  printf '%s\n' "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
+  : > "$CASE_DIR/protected-paths"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$SAFE_DIR" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" FM_FAKE_BLOCK_GET=1 \
+    FM_FAKE_BLOCK_READY="$CASE_DIR/block-ready" \
+    FM_FAKE_BLOCK_RELEASE="$CASE_DIR/block-release" \
+    FM_FAKE_BARRIER_PID_FILE="$CASE_DIR/barrier.pid" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off \
+    >"$CASE_DIR/spawn.out" 2>&1 &
+  spawn_pid=$!
+  BLOCKED_SPAWN_PID=$spawn_pid
+  for _ in $(seq 1 100); do
+    [ -s "$CASE_DIR/block-ready" ] && break
+    sleep 0.05
+  done
+  [ -s "$CASE_DIR/block-ready" ] \
+    || fail "acquisition did not reach its blocked Treehouse draw"
+  BLOCKED_TREEHOUSE_PID=$(cat "$CASE_DIR/block-ready")
+  receipt=$(printf '%s\n' \
+    "$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.acquire."*.receipt)
+  assert_present "$receipt" \
+    "blocked acquisition did not publish its recovery receipt"
+
+  bootstrap_out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_LOCKED=1 \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" \
+    FM_FAKE_REAL_CAT="$SYSTEM_CAT" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_contains "$bootstrap_out" \
+    "WORKTREE_PROTECTION: failed: task set is locked by another operation" \
+    "bootstrap did not fail loudly at the shared task-set boundary"
+  assert_present "$receipt" \
+    "bootstrap raced and retired an active acquisition receipt"
+
+  : > "$CASE_DIR/block-release"
+  if wait "$spawn_pid"; then
+    spawn_status=0
+  else
+    spawn_status=$?
+  fi
+  BLOCKED_SPAWN_PID=
+  BLOCKED_TREEHOUSE_PID=
+  [ "$spawn_status" -eq 0 ] \
+    || fail "spawn failed after bootstrap respected its acquisition lock"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "spawn did not publish durable metadata after bootstrap contention"
+  assert_absent "$receipt" \
+    "published spawn did not retire its acquisition receipt"
+  pass "bootstrap serializes recovery with active acquisition"
+}
+
+test_registered_home_owns_transferred_lease() {
+  local rec id helper_pid helper_status receipt bootstrap_out _
+  id=fm-registered-home-r14
+  rec=$(make_case registered-home "$id")
+  read_case_record "$rec"
+  : > "$CASE_DIR/treehouse.log"
+  printf '%s\n' "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
+  : > "$CASE_DIR/protected-paths"
+
+  FM_PENDING_TEST_ROOT="$ROOT" FM_PENDING_TEST_STATE="$HOME_DIR/state" \
+    FM_PENDING_TEST_PROJECT="$PROJECT_DIR" FM_PENDING_TEST_HOLDER="$id" \
+    FM_PENDING_TEST_REGISTRY="$HOME_DIR/data/secondmates.md" \
+    FM_PENDING_TEST_READY="$CASE_DIR/registered-ready" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_EXPECT_HOLDER="$id" PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c '
+      set -u
+      . "$FM_PENDING_TEST_ROOT/bin/fm-wake-lib.sh"
+      . "$FM_PENDING_TEST_ROOT/bin/fm-worktree-lease-lib.sh"
+      fm_treehouse_lease_acquire_noncolliding \
+        "$FM_PENDING_TEST_STATE" "$FM_PENDING_TEST_PROJECT" \
+        "$FM_PENDING_TEST_HOLDER" "$FM_PENDING_TEST_REGISTRY" || exit 1
+      fm_treehouse_lease_transfer "$FM_PENDING_TEST_PROJECT" \
+        "$FM_TREEHOUSE_LEASE_PATH" "$FM_PENDING_TEST_HOLDER" || exit 1
+      printf -- "- %s - Registered home (home: %s; scope: Test scope; projects: none; added 2026-08-22)\n" \
+        "$FM_PENDING_TEST_HOLDER" "$FM_TREEHOUSE_LEASE_PATH" \
+        > "$FM_PENDING_TEST_REGISTRY"
+      : > "$FM_PENDING_TEST_READY"
+      while :; do sleep 0.05; done
+    ' >"$CASE_DIR/registered.out" 2>&1 &
+  helper_pid=$!
+  BLOCKED_SPAWN_PID=$helper_pid
+  for _ in $(seq 1 100); do
+    [ -e "$CASE_DIR/registered-ready" ] && break
+    kill -0 "$helper_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  [ -e "$CASE_DIR/registered-ready" ] \
+    || fail "registered-home helper did not publish its durable owner"
+  kill -KILL "$helper_pid" 2>/dev/null \
+    || fail "could not stop the registered-home helper before receipt commit"
+  if wait "$helper_pid"; then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  BLOCKED_SPAWN_PID=
+  [ "$helper_status" -ne 0 ] || fail "registered-home interruption reported success"
+  receipt=$(printf '%s\n' \
+    "$HOME_DIR/state/.treehouse-acquire-recovery/$id.acquire."*.receipt)
+  assert_present "$receipt" \
+    "registered home lost recovery ownership before explicit commit"
+
+  bootstrap_out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_LOCKED=1 \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="$id" \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_REAL_CAT="$SYSTEM_CAT" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$bootstrap_out" 'acquisition recovery fm-' \
+    "bootstrap did not reconcile registered-home recovery"
+  assert_absent "$receipt" \
+    "bootstrap retained a registered-home recovery receipt"
+  [ -s "$CASE_DIR/lease-state" ] \
+    || fail "bootstrap returned a lease owned by the durable home registry"
+  assert_no_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
+    "$CASE_DIR/treehouse.log" \
+    "bootstrap returned the registered home's exact lease"
+  pass "durable home registry preserves transferred lease recovery"
 }
 
 test_teardown_cannot_race_one_slot_acquisition() {
@@ -740,7 +928,9 @@ test_unreadable_metadata_refuses_before_acquisition
 test_postcheck_read_failure_preserves_candidate
 test_pre_gate_cleanup_owns_wrapper
 test_interrupted_acquisition_reaps_barrier
-test_post_success_signal_returns_pending_lease
+test_transferred_lease_keeps_recovery_owner
+test_bootstrap_refuses_active_acquisition
+test_registered_home_owns_transferred_lease
 test_teardown_cannot_race_one_slot_acquisition
 
 echo "# all fm-spawn-worktree-lease-guard tests passed"

@@ -398,9 +398,10 @@ test_home_seed_warns_when_acquired_home_return_fails() {
 }
 
 test_home_seed_does_not_return_unsafe_acquired_home() {
-  local home descendant fakebin log err
+  local home descendant_home descendant fakebin log err
   home="$TMP_ROOT/dash-active-home"
-  descendant="$home/data/dash-descendant-home"
+  descendant_home="$TMP_ROOT/dash-descendant-active-home"
+  descendant="$descendant_home/data/dash-descendant-home"
   err="$TMP_ROOT/dash-active.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
@@ -419,8 +420,14 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
     && fail "seed returned an unsafe acquired active home through treehouse"
   [ -d "$home/projects/alpha" ] || fail "unsafe acquired-home rollback removed the active home"
 
+  mkdir -p "$descendant_home/projects" "$descendant_home/data" "$descendant_home/state"
+  fm_git_init_commit "$descendant_home/projects/alpha"
+  fm_git_add_origin "$descendant_home/projects/alpha" "$TMP_ROOT/remotes/dash-descendant-active-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' \
+    > "$descendant_home/data/projects.md"
   : > "$log"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$descendant" FM_FAKE_TMUX_LOG="$log" \
+  if PATH="$fakebin:$PATH" FM_HOME="$descendant_home" \
+    FM_FAKE_TREEHOUSE_HOME="$descendant" FM_FAKE_TMUX_LOG="$log" \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home inside the active firstmate home"
   fi

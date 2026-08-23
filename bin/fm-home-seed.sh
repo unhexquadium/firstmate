@@ -396,7 +396,7 @@ acquire_treehouse_home() {
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. The shared acquisition boundary reads
   # Treehouse's JSON allocation so rollback retains its exact lease identity.
-  fm_treehouse_lease_acquire_noncolliding "$STATE" "$FM_ROOT" "$id" || {
+  fm_treehouse_lease_acquire_noncolliding "$STATE" "$FM_ROOT" "$id" "$REG" || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
@@ -603,6 +603,11 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
+  fm_treehouse_recovery_receipt_clear \
+    "$FM_TREEHOUSE_ACQUIRE_RECEIPT" 2>/dev/null || true
+  FM_TREEHOUSE_PENDING_LEASE_PATH=
+  FM_TREEHOUSE_PENDING_LEASE_ID=
+  fm_treehouse_acquire_context_clear
 }
 
 seed_remove_created_home() {
@@ -887,7 +892,6 @@ seed_home() {
     SEED_LEASE_ID=$FM_TREEHOUSE_LEASE_ID
     SEED_HOME="$home"
     fm_treehouse_lease_transfer "$FM_ROOT" "$home" "$id" || return 1
-    seed_task_set_lock_release
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
@@ -990,6 +994,11 @@ seed_home() {
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
   SEED_COMMITTED=1
+  if [ "$SEED_HOME_ACQUIRED" = 1 ] \
+    && ! fm_treehouse_lease_commit "$FM_ROOT" "$home" "$id"; then
+    echo "warning: could not retire published Treehouse lease recovery for $id" >&2
+  fi
+  seed_task_set_lock_release
   seed_registry_lock_release
   trap - EXIT INT TERM
   rm -rf -- "$SEED_BACKUP_DIR"

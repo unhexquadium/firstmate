@@ -24,6 +24,8 @@
 
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-secondmate-registry-lib.sh"
 
 # shellcheck disable=SC2034 # Read by fm-spawn after acquisition returns.
 FM_TREEHOUSE_LEASE_PATH=
@@ -42,6 +44,7 @@ FM_TREEHOUSE_ACQUIRE_PROJECT=
 FM_TREEHOUSE_ACQUIRE_HOLDER=
 FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
 FM_TREEHOUSE_ACQUIRE_RECEIPT=
+FM_TREEHOUSE_ACQUIRE_OWNER_REGISTRY=
 FM_TREEHOUSE_PENDING_LEASE_PATH=
 FM_TREEHOUSE_PENDING_LEASE_ID=
 FM_TREEHOUSE_RECOVERY_ERROR=
@@ -261,7 +264,6 @@ fm_treehouse_active_acquire_stop() {
   local holder=$FM_TREEHOUSE_ACQUIRE_HOLDER identity=$FM_TREEHOUSE_ACQUIRE_IDENTITY
   local receipt=$FM_TREEHOUSE_ACQUIRE_RECEIPT start=$FM_TREEHOUSE_ACQUIRE_START
   local operation_holder=$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER
-  local pending=$FM_TREEHOUSE_PENDING_LEASE_PATH lease_id=$FM_TREEHOUSE_PENDING_LEASE_ID
   local current_identity reconcile_status=1
   if [ -n "$pid" ]; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
@@ -280,11 +282,7 @@ fm_treehouse_active_acquire_stop() {
     wait "$pid" 2>/dev/null || true
   fi
   if [ -n "$project" ] && [ -n "$receipt" ]; then
-    if [ -n "$pending" ] && [ -n "$lease_id" ] \
-      && fm_treehouse_lease_return_if_id \
-        "$project" "$pending" "$lease_id" >/dev/null 2>&1; then
-      reconcile_status=0
-    elif fm_treehouse_reconcile_recovery_receipt "$state" "$receipt"; then
+    if fm_treehouse_reconcile_recovery_receipt "$state" "$receipt"; then
       reconcile_status=0
     else
       reconcile_status=$?
@@ -304,6 +302,7 @@ fm_treehouse_active_acquire_stop() {
   FM_TREEHOUSE_ACQUIRE_HOLDER=
   FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
   FM_TREEHOUSE_ACQUIRE_RECEIPT=
+  FM_TREEHOUSE_ACQUIRE_OWNER_REGISTRY=
   FM_TREEHOUSE_PENDING_LEASE_PATH=
   FM_TREEHOUSE_PENDING_LEASE_ID=
   [ -z "$output" ] || rm -f -- "$output"
@@ -332,10 +331,12 @@ fm_treehouse_acquire_context_clear() {
   FM_TREEHOUSE_ACQUIRE_HOLDER=
   FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
   FM_TREEHOUSE_ACQUIRE_RECEIPT=
+  FM_TREEHOUSE_ACQUIRE_OWNER_REGISTRY=
 }
 
-fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holder> <project> <lease-id> <lease-path>
-  local receipt=$1 holder=$2 operation_holder=$3 project=$4 lease_id=$5 lease_path=$6 tmp
+fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holder> <project> <lease-id> <lease-path> [owner-registry]
+  local receipt=$1 holder=$2 operation_holder=$3 project=$4 lease_id=$5 lease_path=$6
+  local owner_registry=${7:-} tmp
   FM_TREEHOUSE_RECOVERY_ERROR=
   case "$project" in
     /*) ;;
@@ -344,7 +345,7 @@ fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holde
       return 1
       ;;
   esac
-  case "$holder$operation_holder$project$lease_id$lease_path" in
+  case "$holder$operation_holder$project$lease_id$lease_path$owner_registry" in
     *$'\n'*|*$'\t'*)
       FM_TREEHOUSE_RECOVERY_ERROR="acquisition recovery value contains a newline or tab"
       return 1
@@ -366,6 +367,11 @@ fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holde
     return 1
     ;;
   esac
+  case "$owner_registry" in ''|/*) ;; *)
+    FM_TREEHOUSE_RECOVERY_ERROR="acquisition owner registry is not absolute: $owner_registry"
+    return 1
+    ;;
+  esac
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || {
     FM_TREEHOUSE_RECOVERY_ERROR="unsafe acquisition recovery receipt: $receipt"
     return 1
@@ -377,6 +383,7 @@ fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holde
     printf 'project=%s\n' "$project"
     printf 'lease_id=%s\n' "$lease_id"
     printf 'lease_path=%s\n' "$lease_path"
+    printf 'owner_registry=%s\n' "$owner_registry"
   } > "$tmp" || ! mv -f -- "$tmp" "$receipt"; then
     rm -f -- "$tmp"
     FM_TREEHOUSE_RECOVERY_ERROR="could not publish acquisition recovery receipt: $receipt"
@@ -384,8 +391,9 @@ fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holde
   fi
 }
 
-fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
-  local state=$1 project=$2 holder=$3 dir receipt operation_holder attempt
+fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder> [owner-registry]
+  local state=$1 project=$2 holder=$3 owner_registry=${4:-}
+  local dir receipt operation_holder attempt
   FM_TREEHOUSE_RECOVERY_ERROR=
   case "$holder" in ''|*[!A-Za-z0-9._:-]*)
     FM_TREEHOUSE_RECOVERY_ERROR="lease holder is unsafe: $holder"
@@ -417,12 +425,13 @@ fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
     return 1
   }
   if ! fm_treehouse_recovery_receipt_publish \
-    "$receipt" "$holder" "$operation_holder" "$project" '' ''; then
+    "$receipt" "$holder" "$operation_holder" "$project" '' '' "$owner_registry"; then
     rm -f -- "$receipt"
     return 1
   fi
   FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=$operation_holder
   FM_TREEHOUSE_ACQUIRE_RECEIPT=$receipt
+  FM_TREEHOUSE_ACQUIRE_OWNER_REGISTRY=$owner_registry
 }
 
 fm_treehouse_recovery_receipt_clear() {  # <receipt>
@@ -436,6 +445,37 @@ fm_treehouse_recovery_record_value() {  # <record> <key>
   [ "$count" -eq 1 ] || return 1
   value=$(sed -n "s/^${key}=//p" "$record" 2>/dev/null) || return 1
   printf '%s\n' "$value"
+}
+
+fm_treehouse_recovery_record_optional_value() {  # <record> <key>
+  local record=$1 key=$2 count value
+  count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' \
+    "$record" 2>/dev/null) || return 1
+  case "$count" in
+    0) return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  value=$(sed -n "s/^${key}=//p" "$record" 2>/dev/null) || return 1
+  printf '%s\n' "$value"
+}
+
+fm_treehouse_recovery_registry_owns() {  # <registry> <holder> <lease-path>
+  local registry=$1 holder=$2 lease_path=$3 count home remote home_key lease_key
+  [ -f "$registry" ] && [ ! -L "$registry" ] || {
+    [ ! -e "$registry" ] && [ ! -L "$registry" ] && return 1
+    return 2
+  }
+  count=$(awk -v id="$holder" '$1 == "-" && $2 == id { count++ } END { print count + 0 }' \
+    "$registry" 2>/dev/null) || return 2
+  [ "$count" -gt 0 ] || return 1
+  [ "$count" -eq 1 ] || return 2
+  home=$(secondmate_registry_field "$registry" "$holder" home) || return 2
+  remote=$(secondmate_registry_field "$registry" "$holder" remote) || return 2
+  [ "$remote" = 0 ] || return 1
+  home_key=$(secondmate_registry_path_key "$home" 2>/dev/null) || return 2
+  lease_key=$(secondmate_registry_path_key "$lease_path" 2>/dev/null) || return 2
+  [ "$home_key" = "$lease_key" ]
 }
 
 fm_treehouse_allocation_parse() {  # <expected-holder>
@@ -489,13 +529,15 @@ fm_treehouse_recovery_status_match() {  # <operation-holder> <lease-id> <lease-p
 
 fm_treehouse_reconcile_recovery_receipt() {  # <state-dir> <receipt>
   local state=$1 receipt=$2 holder operation_holder project lease_id lease_path
-  local status_json match collision_status
+  local owner_registry status_json match collision_status registry_status
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
   holder=$(fm_treehouse_recovery_record_value "$receipt" holder) || return 1
   operation_holder=$(fm_treehouse_recovery_record_value "$receipt" operation_holder) || return 1
   project=$(fm_treehouse_recovery_record_value "$receipt" project) || return 1
   lease_id=$(fm_treehouse_recovery_record_value "$receipt" lease_id) || return 1
   lease_path=$(fm_treehouse_recovery_record_value "$receipt" lease_path) || return 1
+  owner_registry=$(fm_treehouse_recovery_record_optional_value \
+    "$receipt" owner_registry) || return 1
   [ "$(basename "$receipt" .receipt)" = "$operation_holder" ] || return 1
   status_json=$(CDPATH='' cd -- "$project" && treehouse status --json) || return 1
   match=$(printf '%s\n' "$status_json" \
@@ -506,6 +548,7 @@ fm_treehouse_reconcile_recovery_receipt() {  # <state-dir> <receipt>
   lease_path=${match#*$'\t'}
   fm_treehouse_recovery_receipt_publish \
     "$receipt" "$holder" "$operation_holder" "$project" "$lease_id" "$lease_path" \
+    "$owner_registry" \
     || return 1
   if fm_worktree_collision_owner "$state" "$lease_path"; then
     return 0
@@ -513,6 +556,15 @@ fm_treehouse_reconcile_recovery_receipt() {  # <state-dir> <receipt>
     collision_status=$?
   fi
   [ "$collision_status" -eq 1 ] || return 1
+  if [ -n "$owner_registry" ]; then
+    if fm_treehouse_recovery_registry_owns \
+      "$owner_registry" "$holder" "$lease_path"; then
+      return 0
+    else
+      registry_status=$?
+    fi
+    [ "$registry_status" -eq 1 ] || return 1
+  fi
   fm_treehouse_lease_return_if_id "$project" "$lease_path" "$lease_id" \
     >/dev/null 2>&1
 }
@@ -565,10 +617,16 @@ fm_treehouse_lease_transfer() {  # <project-dir> <path> <holder>
     && [ -n "$FM_TREEHOUSE_PENDING_LEASE_ID" ] \
     && [ "$FM_TREEHOUSE_ACQUIRE_PROJECT" = "$project" ] \
     && [ "$FM_TREEHOUSE_ACQUIRE_HOLDER" = "$holder" ] || return 1
-  fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || return 1
+}
+
+fm_treehouse_lease_commit() {  # <project-dir> <path> <holder>
+  local project=$1 path=$2 holder=$3 status=0
+  fm_treehouse_lease_transfer "$project" "$path" "$holder" || return 1
+  fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || status=1
   FM_TREEHOUSE_PENDING_LEASE_PATH=
   FM_TREEHOUSE_PENDING_LEASE_ID=
   fm_treehouse_acquire_context_clear
+  return "$status"
 }
 
 fm_treehouse_acquire_signal_exit() {
@@ -640,8 +698,9 @@ fm_treehouse_acquire_barrier_start() {  # <state-dir>
   done
 }
 
-fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder>
-  local state=$1 project=$2 holder=$3 attempts attempt=0 candidate candidate_real
+fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder> [owner-registry]
+  local state=$1 project=$2 holder=$3 owner_registry=${4:-}
+  local attempts attempt=0 candidate candidate_real
   local rejected=0 rejected_paths=$'\n' collision_status acquire_status identity previous_identity _
   local allocation lease_id
   FM_TREEHOUSE_LEASE_PATH=
@@ -668,7 +727,8 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
   }
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
-    if ! fm_treehouse_recovery_receipt_write "$state" "$project" "$holder"; then
+    if ! fm_treehouse_recovery_receipt_write \
+      "$state" "$project" "$holder" "$owner_registry"; then
       fm_treehouse_acquire_barrier_stop
       fm_treehouse_acquire_context_clear
       echo "error: cannot establish durable Treehouse acquisition cleanup ownership: $FM_TREEHOUSE_RECOVERY_ERROR" >&2
@@ -782,7 +842,8 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     candidate=${allocation#*$'\t'}
     if ! fm_treehouse_recovery_receipt_publish \
       "$FM_TREEHOUSE_ACQUIRE_RECEIPT" "$holder" \
-      "$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER" "$project" "$lease_id" "$candidate"; then
+      "$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER" "$project" "$lease_id" "$candidate" \
+      "$owner_registry"; then
       fm_treehouse_acquire_output_clear
       fm_treehouse_acquire_barrier_stop
       fm_treehouse_acquire_context_clear
