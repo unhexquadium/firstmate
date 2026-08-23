@@ -12,6 +12,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-lease-guard)
+SYSTEM_CAT=$(command -v cat)
 BLOCKED_SPAWN_PID=
 BLOCKED_TREEHOUSE_PID=
 BLOCKED_BARRIER_PID=
@@ -58,10 +59,15 @@ case "${1:-}" in
     shift
     saw_lease=0
     saw_holder=0
+    holder=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --lease) saw_lease=1 ;;
-        --lease-holder) shift; [ "${1:-}" = "${FM_FAKE_EXPECT_HOLDER:-}" ] && saw_holder=1 ;;
+        --lease-holder)
+          shift
+          holder=${1:-}
+          [ "$holder" = "${FM_FAKE_EXPECT_HOLDER:-}" ] && saw_holder=1
+          ;;
       esac
       shift
     done
@@ -76,6 +82,9 @@ case "${1:-}" in
     if grep -Fqx -- "$path" "${FM_FAKE_PROTECTED_PATHS:?FM_FAKE_PROTECTED_PATHS unset}" \
       && ! worktree_in_use "$path"; then
       : > "${FM_FAKE_PREACQUIRE_VIOLATION:?FM_FAKE_PREACQUIRE_VIOLATION unset}"
+    fi
+    if [ -n "${FM_FAKE_LEASE_STATE:-}" ]; then
+      printf '%s\n%s\n' "$holder" "$path" > "$FM_FAKE_LEASE_STATE"
     fi
     if [ "${FM_FAKE_BLOCK_GET:-0}" = 1 ] && [ "$count" -eq 1 ]; then
       worktree_pids "${FM_FAKE_PROTECTED_PATH:?FM_FAKE_PROTECTED_PATH unset}" \
@@ -98,9 +107,41 @@ case "${1:-}" in
     fi
     printf '%s\n' "$path"
     ;;
-  return) exit 0 ;;
+  status)
+    [ "${2:-}" = --json ] || exit 43
+    if [ -n "${FM_FAKE_LEASE_STATE:-}" ] && [ -s "$FM_FAKE_LEASE_STATE" ]; then
+      lease_holder=$(sed -n '1p' "$FM_FAKE_LEASE_STATE")
+      lease_path=$(sed -n '2p' "$FM_FAKE_LEASE_STATE")
+      printf '[{"path":"%s","lease_id":"fake-lease","lease_holder":"%s","processes":[]}]\n' \
+        "$lease_path" "$lease_holder"
+    else
+      printf '[]\n'
+    fi
+    ;;
+  return)
+    if [ -n "${FM_FAKE_LEASE_STATE:-}" ]; then
+      : > "$FM_FAKE_LEASE_STATE"
+    fi
+    exit 0
+    ;;
   *) exit 43 ;;
 esac
+SH
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=
+for arg in "$@"; do
+  [ "$arg" = -- ] || target=$arg
+done
+if [ -n "${FM_FAKE_UNREADABLE_META:-}" ] \
+  && [ "$target" = "$FM_FAKE_UNREADABLE_META" ]; then
+  exit 74
+fi
+if [ -n "${FM_FAKE_REAL_CAT:-}" ]; then
+  exec "$FM_FAKE_REAL_CAT" "$@"
+fi
+command -p cat "$@"
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -127,7 +168,7 @@ SH
 #!/usr/bin/env bash
 exit 1
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/no-mistakes" \
+  chmod +x "$fakebin/treehouse" "$fakebin/cat" "$fakebin/tmux" "$fakebin/no-mistakes" \
     "$fakebin/gh-axi" "$fakebin/gh"
   printf '%s\n' "$fakebin"
 }
@@ -172,6 +213,8 @@ run_spawn() {
     FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
     FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
     FM_FAKE_EXPECT_HOLDER="fm-$id" \
+    FM_FAKE_REAL_CAT="$SYSTEM_CAT" \
+    FM_FAKE_UNREADABLE_META="${FM_FAKE_UNREADABLE_META:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -306,6 +349,29 @@ test_unpublished_lease_is_returned_on_abort() {
   pass "an accepted lease is holder-conditionally returned when spawn aborts before publication"
 }
 
+test_unreadable_metadata_refuses_before_acquisition() {
+  local rec id out status unreadable_meta
+  id=lease-unreadable-r10
+  rec=$(make_case unreadable "$id")
+  read_case_record "$rec"
+  unreadable_meta="$HOME_DIR/state/live-owner.meta"
+  fm_write_meta "$unreadable_meta" \
+    'window=firstmate:fm-live-owner' "worktree=$COLLISION_DIR" \
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
+
+  out=$(FM_FAKE_UNREADABLE_META="$unreadable_meta" \
+    run_spawn "$id" "$SAFE_DIR" "$SAFE_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn ignored unreadable active task metadata"
+  assert_contains "$out" "cannot read task metadata: $unreadable_meta" \
+    "unreadable task metadata did not fail the collision boundary loudly"
+  assert_absent "$CASE_DIR/treehouse.count" \
+    "spawn acquired a Treehouse lease before refusing unreadable metadata"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "unreadable metadata refusal published new task metadata"
+  pass "unreadable task metadata fails closed before Treehouse acquisition"
+}
+
 test_interrupted_acquisition_reaps_barrier() {
   local rec id spawn_pid barrier_pid barrier_identity current_identity status _
   local treehouse_identity current_treehouse_identity
@@ -316,7 +382,7 @@ test_interrupted_acquisition_reaps_barrier() {
     'window=firstmate:fm-live-owner' "worktree=$COLLISION_DIR" \
     "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
   : > "$CASE_DIR/treehouse.log"
-  printf '%s\n%s\n' "$COLLISION_DIR" "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
+  printf '%s\n' "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
   printf '%s\n' "$COLLISION_DIR" > "$CASE_DIR/protected-paths"
 
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -330,6 +396,8 @@ test_interrupted_acquisition_reaps_barrier() {
     FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
     FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
     FM_FAKE_EXPECT_HOLDER="fm-$id" FM_FAKE_BLOCK_GET=1 \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_REAL_CAT="$SYSTEM_CAT" \
     FM_FAKE_BLOCK_READY="$CASE_DIR/block-ready" \
     FM_FAKE_BARRIER_PID_FILE="$CASE_DIR/barrier.pid" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -379,7 +447,12 @@ test_interrupted_acquisition_reaps_barrier() {
   BLOCKED_BARRIER_PID=
   assert_absent "$HOME_DIR/state/$id.meta" \
     "interrupted acquisition published task metadata"
-  pass "an interrupted acquisition reaps its temporary cwd barrier"
+  [ ! -s "$CASE_DIR/lease-state" ] \
+    || fail "pre-output interruption orphaned its durable Treehouse lease"
+  assert_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+    "$CASE_DIR/treehouse.log" \
+    "pre-output interruption did not reconcile and return its durable lease"
+  pass "an interrupted acquisition reaps its barrier and unpublished lease"
 }
 
 test_post_success_signal_returns_pending_lease() {
@@ -520,6 +593,7 @@ test_exhausted_redraw_fails_loudly
 test_all_distinct_collisions_allow_safe_draw
 test_non_colliding_lease_is_unaffected
 test_unpublished_lease_is_returned_on_abort
+test_unreadable_metadata_refuses_before_acquisition
 test_interrupted_acquisition_reaps_barrier
 test_post_success_signal_returns_pending_lease
 test_teardown_cannot_race_one_slot_acquisition

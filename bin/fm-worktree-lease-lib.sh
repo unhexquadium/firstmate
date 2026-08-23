@@ -32,11 +32,17 @@ FM_TREEHOUSE_COLLISION_ERROR=
 FM_TREEHOUSE_COLLISION_PATH_COUNT=0
 FM_TREEHOUSE_ACQUIRE_GUARDS=
 FM_TREEHOUSE_ACQUIRE_PID=
+FM_TREEHOUSE_ACQUIRE_IDENTITY=
 FM_TREEHOUSE_ACQUIRE_OUTPUT=
+FM_TREEHOUSE_ACQUIRE_START=
 FM_TREEHOUSE_ACQUIRE_STATE=
 FM_TREEHOUSE_ACQUIRE_PROJECT=
 FM_TREEHOUSE_ACQUIRE_HOLDER=
 FM_TREEHOUSE_PENDING_LEASE_PATH=
+FM_WORKTREE_META_ERROR=
+FM_WORKTREE_META_BACKEND=
+FM_WORKTREE_META_REMOTE_HOST=
+FM_WORKTREE_META_WORKTREE=
 FM_WORKTREE_GUARD_PID=
 FM_WORKTREE_GUARD_IDENTITY=
 FM_WORKTREE_PROTECTION_ERROR=
@@ -51,6 +57,36 @@ fm_worktree_real_or_raw() {  # <path>
     (CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || printf '%s\n' "$path"
   else
     printf '%s\n' "$path"
+  fi
+}
+
+fm_worktree_meta_read() {  # <meta>
+  local meta=$1 content line worktree_count=0
+  FM_WORKTREE_META_ERROR=
+  FM_WORKTREE_META_BACKEND=
+  FM_WORKTREE_META_REMOTE_HOST=
+  FM_WORKTREE_META_WORKTREE=
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    FM_WORKTREE_META_ERROR="unsafe task metadata path: $meta"
+    return 2
+  fi
+  if ! content=$(cat -- "$meta" 2>/dev/null); then
+    FM_WORKTREE_META_ERROR="cannot read task metadata: $meta"
+    return 2
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      backend=*) FM_WORKTREE_META_BACKEND=${line#backend=} ;;
+      remote_host=*) FM_WORKTREE_META_REMOTE_HOST=${line#remote_host=} ;;
+      worktree=*)
+        worktree_count=$((worktree_count + 1))
+        FM_WORKTREE_META_WORKTREE=${line#worktree=}
+        ;;
+    esac
+  done <<< "$content"
+  if [ "$worktree_count" -gt 1 ]; then
+    FM_WORKTREE_META_ERROR="ambiguous worktree fields in task metadata: $meta"
+    return 2
   fi
 }
 
@@ -82,23 +118,18 @@ fm_worktree_treehouse_status_row() {
 }
 
 fm_worktree_collision_owner() {  # <state-dir> <candidate>
-  local state=$1 candidate=$2 candidate_real meta recorded recorded_real count
+  local state=$1 candidate=$2 candidate_real meta recorded recorded_real
   FM_TREEHOUSE_COLLISION_OWNER=
   FM_TREEHOUSE_COLLISION_ERROR=
   candidate_real=$(fm_worktree_real_or_raw "$candidate")
   [ -d "$state" ] || return 1
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
-    if [ ! -f "$meta" ] || [ -L "$meta" ]; then
-      FM_TREEHOUSE_COLLISION_ERROR="unsafe task metadata path: $meta"
+    if ! fm_worktree_meta_read "$meta"; then
+      FM_TREEHOUSE_COLLISION_ERROR=$FM_WORKTREE_META_ERROR
       return 2
     fi
-    count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
-    if [ "$count" -gt 1 ]; then
-      FM_TREEHOUSE_COLLISION_ERROR="ambiguous worktree fields in task metadata: $meta"
-      return 2
-    fi
-    recorded=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | tail -n 1)
+    recorded=$FM_WORKTREE_META_WORKTREE
     [ -n "$recorded" ] || continue
     recorded_real=$(fm_worktree_real_or_raw "$recorded")
     [ "$recorded_real" = "$candidate_real" ] || continue
@@ -109,22 +140,17 @@ fm_worktree_collision_owner() {  # <state-dir> <candidate>
 }
 
 fm_worktree_collision_path_count() {  # <state-dir>
-  local state=$1 meta recorded recorded_real count paths=$'\n'
+  local state=$1 meta recorded recorded_real paths=$'\n'
   FM_TREEHOUSE_COLLISION_PATH_COUNT=0
   FM_TREEHOUSE_COLLISION_ERROR=
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
-    if [ ! -f "$meta" ] || [ -L "$meta" ]; then
-      FM_TREEHOUSE_COLLISION_ERROR="unsafe task metadata path: $meta"
+    if ! fm_worktree_meta_read "$meta"; then
+      FM_TREEHOUSE_COLLISION_ERROR=$FM_WORKTREE_META_ERROR
       return 2
     fi
-    count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
-    if [ "$count" -gt 1 ]; then
-      FM_TREEHOUSE_COLLISION_ERROR="ambiguous worktree fields in task metadata: $meta"
-      return 2
-    fi
-    recorded=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | tail -n 1)
+    recorded=$FM_WORKTREE_META_WORKTREE
     [ -n "$recorded" ] || continue
     recorded_real=$(fm_worktree_real_or_raw "$recorded")
     case "$paths" in
@@ -136,22 +162,17 @@ fm_worktree_collision_path_count() {  # <state-dir>
 }
 
 fm_worktree_meta_local_path() {  # <meta> -> sets FM_WORKTREE_PROTECTION_WORKTREE
-  local meta=$1 backend remote worktree count
+  local meta=$1 backend remote worktree
   FM_WORKTREE_PROTECTION_WORKTREE=
-  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
-    FM_WORKTREE_PROTECTION_ERROR="unsafe task metadata path: $meta"
+  if ! fm_worktree_meta_read "$meta"; then
+    FM_WORKTREE_PROTECTION_ERROR=$FM_WORKTREE_META_ERROR
     return 2
   fi
-  backend=$(sed -n 's/^backend=//p' "$meta" 2>/dev/null | tail -n 1)
+  backend=$FM_WORKTREE_META_BACKEND
   [ "$backend" != orca ] || return 1
-  remote=$(sed -n 's/^remote_host=//p' "$meta" 2>/dev/null | tail -n 1)
+  remote=$FM_WORKTREE_META_REMOTE_HOST
   [ -z "$remote" ] || return 1
-  count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
-  if [ "$count" -gt 1 ]; then
-    FM_WORKTREE_PROTECTION_ERROR="ambiguous worktree fields in task metadata: $meta"
-    return 2
-  fi
-  worktree=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | tail -n 1)
+  worktree=$FM_WORKTREE_META_WORKTREE
   case "$worktree" in
     /*) ;;
     '') return 1 ;;
@@ -231,11 +252,19 @@ fm_treehouse_acquire_barrier_stop() {
 fm_treehouse_active_acquire_stop() {
   local pid=$FM_TREEHOUSE_ACQUIRE_PID output=$FM_TREEHOUSE_ACQUIRE_OUTPUT
   local state=$FM_TREEHOUSE_ACQUIRE_STATE project=$FM_TREEHOUSE_ACQUIRE_PROJECT
-  local holder=$FM_TREEHOUSE_ACQUIRE_HOLDER candidate pending=0 collision_status
-  if [ -n "$pid" ]; then
-    kill -TERM "$pid" 2>/dev/null || true
+  local holder=$FM_TREEHOUSE_ACQUIRE_HOLDER identity=$FM_TREEHOUSE_ACQUIRE_IDENTITY
+  local start=$FM_TREEHOUSE_ACQUIRE_START candidate pending=0 collision_status
+  local current_identity reconcile_status=1
+  if [ -n "$pid" ] && [ -n "$identity" ]; then
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ "$current_identity" = "$identity" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
     sleep 0.1
-    kill -KILL "$pid" 2>/dev/null || true
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ "$current_identity" = "$identity" ]; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
   fi
   if [ -n "$FM_TREEHOUSE_PENDING_LEASE_PATH" ]; then
@@ -244,7 +273,16 @@ fm_treehouse_active_acquire_stop() {
   elif [ -n "$output" ] && [ -f "$output" ]; then
     candidate=$(< "$output")
   fi
-  if [ -n "$candidate" ] && [ -n "$project" ] && [ -n "$holder" ]; then
+  if [ -z "$candidate" ] && [ -n "$project" ] && [ -n "$holder" ]; then
+    if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+      reconcile_status=0
+    else
+      reconcile_status=$?
+    fi
+    if [ "$reconcile_status" -ne 0 ]; then
+      echo "error: could not reconcile interrupted Treehouse lease holder '$holder'" >&2
+    fi
+  elif [ -n "$candidate" ] && [ -n "$project" ] && [ -n "$holder" ]; then
     case "$candidate" in
       /*$'\n'*|[!/]*|"") ;;
       /*)
@@ -264,12 +302,15 @@ fm_treehouse_active_acquire_stop() {
     esac
   fi
   FM_TREEHOUSE_ACQUIRE_PID=
+  FM_TREEHOUSE_ACQUIRE_IDENTITY=
   FM_TREEHOUSE_ACQUIRE_OUTPUT=
+  FM_TREEHOUSE_ACQUIRE_START=
   FM_TREEHOUSE_ACQUIRE_STATE=
   FM_TREEHOUSE_ACQUIRE_PROJECT=
   FM_TREEHOUSE_ACQUIRE_HOLDER=
   FM_TREEHOUSE_PENDING_LEASE_PATH=
   [ -z "$output" ] || rm -f -- "$output"
+  [ -z "$start" ] || rm -f -- "$start"
 }
 
 fm_treehouse_acquire_output_clear() {
@@ -278,12 +319,56 @@ fm_treehouse_acquire_output_clear() {
   FM_TREEHOUSE_ACQUIRE_OUTPUT=
 }
 
+fm_treehouse_acquire_start_clear() {
+  [ -z "$FM_TREEHOUSE_ACQUIRE_START" ] \
+    || rm -f -- "$FM_TREEHOUSE_ACQUIRE_START"
+  FM_TREEHOUSE_ACQUIRE_START=
+}
+
 fm_treehouse_acquire_context_clear() {
   FM_TREEHOUSE_ACQUIRE_PID=
+  FM_TREEHOUSE_ACQUIRE_IDENTITY=
   fm_treehouse_acquire_output_clear
+  fm_treehouse_acquire_start_clear
   FM_TREEHOUSE_ACQUIRE_STATE=
   FM_TREEHOUSE_ACQUIRE_PROJECT=
   FM_TREEHOUSE_ACQUIRE_HOLDER=
+}
+
+fm_treehouse_holder_lease_paths() {  # <holder>
+  local holder=$1
+  node -e '
+    let rows;
+    try { rows = JSON.parse(require("fs").readFileSync(0, "utf8")); }
+    catch { process.exit(2); }
+    if (!Array.isArray(rows)) process.exit(2);
+    const holder = process.argv[1];
+    for (const row of rows) {
+      if (!row || row.lease_holder !== holder) continue;
+      if (typeof row.lease_id !== "string" || !row.lease_id ||
+          typeof row.path !== "string" || !row.path.startsWith("/") ||
+          row.path.includes("\n")) process.exit(2);
+      process.stdout.write(`${row.path}\n`);
+    }
+  ' "$holder"
+}
+
+fm_treehouse_reconcile_holder_leases() {  # <state-dir> <project-dir> <holder>
+  local state=$1 project=$2 holder=$3 status_json paths path collision_status
+  status_json=$(CDPATH='' cd -- "$project" && treehouse status --json) || return 1
+  paths=$(printf '%s\n' "$status_json" | fm_treehouse_holder_lease_paths "$holder") \
+    || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if fm_worktree_collision_owner "$state" "$path"; then
+      continue
+    else
+      collision_status=$?
+    fi
+    [ "$collision_status" -eq 1 ] || return 1
+    fm_treehouse_lease_return_if_holder "$project" "$path" "$holder" \
+      >/dev/null 2>&1 || return 1
+  done <<< "$paths"
 }
 
 fm_treehouse_lease_transfer() {  # <project-dir> <path> <holder>
@@ -366,7 +451,7 @@ fm_treehouse_acquire_barrier_start() {  # <state-dir>
 
 fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder>
   local state=$1 project=$2 holder=$3 attempts attempt=0 candidate candidate_real
-  local rejected=0 rejected_paths=$'\n' collision_status acquire_status
+  local rejected=0 rejected_paths=$'\n' collision_status acquire_status identity previous_identity _
   FM_TREEHOUSE_LEASE_PATH=
   [ -z "$FM_TREEHOUSE_PENDING_LEASE_PATH" ] || {
     echo "error: a prior Treehouse lease is still awaiting ownership transfer" >&2
@@ -392,17 +477,85 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       echo "error: could not create Treehouse acquisition output under $state" >&2
       return 1
     }
+    FM_TREEHOUSE_ACQUIRE_START=$(mktemp "$state/.treehouse-acquire-start.XXXXXX") || {
+      fm_treehouse_acquire_barrier_stop
+      fm_treehouse_acquire_context_clear
+      echo "error: could not create Treehouse acquisition start gate under $state" >&2
+      return 1
+    }
+    rm -f -- "$FM_TREEHOUSE_ACQUIRE_START"
     (
+      treehouse_pid=
+      treehouse_identity=
+      fm_treehouse_child_stop() {
+        current_identity=$(fm_pid_identity "$treehouse_pid" 2>/dev/null || true)
+        if [ -n "$current_identity" ]; then
+          [ -n "$treehouse_identity" ] || treehouse_identity=$current_identity
+          if [ "$current_identity" = "$treehouse_identity" ]; then
+            kill -TERM "$treehouse_pid" 2>/dev/null || true
+          fi
+        fi
+        sleep 0.1
+        current_identity=$(fm_pid_identity "$treehouse_pid" 2>/dev/null || true)
+        if [ -n "$treehouse_identity" ] \
+          && [ "$current_identity" = "$treehouse_identity" ]; then
+          kill -KILL "$treehouse_pid" 2>/dev/null || true
+        fi
+        wait "$treehouse_pid" 2>/dev/null || true
+      }
+      trap 'fm_treehouse_child_stop; exit 130' INT
+      trap 'fm_treehouse_child_stop; exit 143' TERM
+      while [ ! -e "$FM_TREEHOUSE_ACQUIRE_START" ]; do sleep 0.01; done
+      rm -f -- "$FM_TREEHOUSE_ACQUIRE_START"
       CDPATH='' cd -- "$project" || exit 1
-      exec treehouse get --lease --lease-holder "$holder"
+      treehouse get --lease --lease-holder "$holder" &
+      treehouse_pid=$!
+      previous_identity=
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        treehouse_identity=$(fm_pid_identity "$treehouse_pid" 2>/dev/null || true)
+        if [ -n "$treehouse_identity" ] \
+          && [ "$treehouse_identity" = "$previous_identity" ]; then
+          break
+        fi
+        previous_identity=$treehouse_identity
+        sleep 0.01
+      done
+      if wait "$treehouse_pid"; then
+        treehouse_status=0
+      else
+        treehouse_status=$?
+      fi
+      exit "$treehouse_status"
     ) > "$FM_TREEHOUSE_ACQUIRE_OUTPUT" &
     FM_TREEHOUSE_ACQUIRE_PID=$!
+    previous_identity=
+    identity=
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      identity=$(fm_pid_identity "$FM_TREEHOUSE_ACQUIRE_PID" 2>/dev/null || true)
+      if [ -n "$identity" ] && [ "$identity" = "$previous_identity" ]; then
+        break
+      fi
+      previous_identity=$identity
+      sleep 0.01
+    done
+    if [ -z "$identity" ] || [ "$identity" != "$previous_identity" ]; then
+      kill "$FM_TREEHOUSE_ACQUIRE_PID" 2>/dev/null || true
+      wait "$FM_TREEHOUSE_ACQUIRE_PID" 2>/dev/null || true
+      fm_treehouse_acquire_barrier_stop
+      fm_treehouse_acquire_context_clear
+      echo "error: could not capture stable Treehouse acquisition process identity" >&2
+      return 1
+    fi
+    FM_TREEHOUSE_ACQUIRE_IDENTITY=$identity
+    : > "$FM_TREEHOUSE_ACQUIRE_START"
     if wait "$FM_TREEHOUSE_ACQUIRE_PID"; then
       acquire_status=0
     else
       acquire_status=$?
     fi
     FM_TREEHOUSE_ACQUIRE_PID=
+    FM_TREEHOUSE_ACQUIRE_IDENTITY=
+    fm_treehouse_acquire_start_clear
     candidate=$(< "$FM_TREEHOUSE_ACQUIRE_OUTPUT")
     if [ "$acquire_status" -ne 0 ]; then
       fm_treehouse_acquire_output_clear
@@ -577,7 +730,7 @@ fm_worktree_shell_process_is_idle() {  # <args>
   for ((index=1; index<${#words[@]}; index++)); do
     token=${words[$index]}
     case "$token" in
-      -l|-i|-li|-il|--login|--noprofile|--norc|--noediting) ;;
+      -l|--login|--noprofile|--norc|--noediting) ;;
       *) return 1 ;;
     esac
   done

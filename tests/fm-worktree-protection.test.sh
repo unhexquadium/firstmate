@@ -410,6 +410,21 @@ test_raw_shell_harness_distinguishes_idle_endpoint() {
   kill "$AGENT_PID" 2>/dev/null || true
   wait "$AGENT_PID" 2>/dev/null || true
   AGENT_PID=
+  bash -c 'cd "$1" || exit 1; exec bash -i' \
+    fm-test-interactive-raw-shell "$WORKTREE_DIR" <&9 >/dev/null 2>&1 &
+  AGENT_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$AGENT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+    sleep 0.05
+  done
+  out=$(run_bootstrap)
+  assert_contains "$out" 'WORKTREE_PROTECTION: task raw-shell-task: skipped: cannot attribute worktree process' \
+    "interactive shell-named raw harness was misclassified as an idle endpoint"
+  assert_grep 'mode=durable' "$record" \
+    "uncertain interactive raw harness discarded its durable exclusion"
+  kill -KILL "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
   out=$(run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
     "raw shell exit did not restore quiescent protection"
