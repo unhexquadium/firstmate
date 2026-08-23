@@ -5,7 +5,8 @@
 #   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
-#       leases the worktree under the secondmate <id> so the home survives with
+#       leases the worktree under an acquisition identity derived from the
+#       secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
@@ -393,8 +394,8 @@ acquire_treehouse_home() {
   local id=$1
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
-  # until teardown or rollback returns it. treehouse prints only the worktree path
-  # to stdout (banners go to stderr), so command substitution captures the path.
+  # until teardown or rollback returns it. The shared acquisition boundary reads
+  # Treehouse's JSON allocation so rollback retains its exact lease identity.
   fm_treehouse_lease_acquire_noncolliding "$STATE" "$FM_ROOT" "$id" || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
@@ -509,7 +510,7 @@ SEED_REGISTRY_LOCK=
 SEED_REGISTRY_LOCK_HELD=0
 SEED_TASK_SET_LOCK=
 SEED_TASK_SET_LOCK_HELD=0
-SEED_LEASE_HOLDER=
+SEED_LEASE_ID=
 
 seed_task_set_lock_release() {
   if [ "$SEED_TASK_SET_LOCK_HELD" -eq 1 ]; then
@@ -591,14 +592,14 @@ seed_rollback_target() {
 }
 
 seed_return_treehouse_home() {
-  local home=$1 holder=$2 abs_home
+  local home=$1 lease_id=$2 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  fm_treehouse_lease_return_if_holder \
-    "$FM_ROOT" "$abs_home" "$holder" >/dev/null || {
+  fm_treehouse_lease_return_if_id \
+    "$FM_ROOT" "$abs_home" "$lease_id" >/dev/null || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
@@ -653,7 +654,7 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME" "$SEED_LEASE_HOLDER"
+      seed_return_treehouse_home "$SEED_HOME" "$SEED_LEASE_ID"
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -881,9 +882,9 @@ seed_home() {
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
-    SEED_LEASE_HOLDER=$id
     acquire_treehouse_home "$id"
     home=$FM_TREEHOUSE_LEASE_PATH
+    SEED_LEASE_ID=$FM_TREEHOUSE_LEASE_ID
     SEED_HOME="$home"
     fm_treehouse_lease_transfer "$FM_ROOT" "$home" "$id" || return 1
     seed_task_set_lock_release

@@ -98,9 +98,12 @@ help_has_flag() {
 
 help_has_flag get --lease || die "installed treehouse lacks get --lease"
 help_has_flag get --lease-holder || die "installed treehouse lacks get --lease-holder"
+help_has_flag get --json || die "installed treehouse lacks get --json"
 help_has_flag status --json || die "installed treehouse lacks status --json"
 help_has_flag return --if-lease-holder \
   || die "installed treehouse lacks return --if-lease-holder"
+help_has_flag return --if-lease-id \
+  || die "installed treehouse lacks return --if-lease-id"
 
 printf 'fm-install-treehouse.sh: installed treehouse %s to %s\n' \
   "$installed_version" "$DESTINATION/treehouse" >&2

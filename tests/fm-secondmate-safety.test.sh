@@ -285,9 +285,10 @@ test_home_seed_uses_treehouse_acquired_home() {
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
-  grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
+  grep -F 'treehouse get --lease --json --lease-holder dash.acquire.' "$log" >/dev/null || fail "seed did not durably lease a home under an acquisition-specific secondmate holder"
   [ -f "$lease" ] || fail "seed did not record a treehouse lease"
-  [ "$(cat "$lease")" = dash ] || fail "seed did not set the lease holder to the secondmate id"
+  sed -n '1p' "$lease" | grep -E '^dash\.acquire\.[A-Za-z0-9-]+$' >/dev/null \
+    || fail "seed did not derive an acquisition-specific holder from the secondmate id"
   [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"
   [ "$(cat "$acquired/.fm-secondmate-home")" = dash ] || fail "seed wrote wrong acquired-home marker"
   [ -d "$acquired/projects/alpha/.git" ] || fail "seed did not clone project into acquired home"
@@ -357,7 +358,7 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
     fail "seed reused an acquired home marked for another secondmate"
   fi
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
-  grep -F "treehouse return --force --if-lease-holder dash $acquired_abs" "$log" >/dev/null \
+  grep -F "treehouse return --force --if-lease-id fake-lease-1 $acquired_abs" "$log" >/dev/null \
     || fail "failed acquired seed did not return the home through treehouse"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
@@ -391,7 +392,7 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   grep -F "warning: failed to return treehouse-acquired home $acquired_abs during seed rollback" "$err" >/dev/null \
     || fail "seed rollback did not warn when treehouse return failed"
   [ -f "$lease" ] || fail "failed rollback return did not preserve lease evidence"
-  grep -F "treehouse return --force --if-lease-holder dash $acquired_abs" "$log" >/dev/null \
+  grep -F "treehouse return --force --if-lease-id fake-lease-1 $acquired_abs" "$log" >/dev/null \
     || fail "failed rollback did not attempt to return the acquired home"
   pass "home seed rollback warns when treehouse-acquired return fails"
 }

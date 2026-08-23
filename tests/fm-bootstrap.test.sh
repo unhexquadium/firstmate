@@ -67,13 +67,16 @@ SH
 #!/usr/bin/env bash
 lease=${FM_FAKE_TREEHOUSE_LEASE_HELP:-0}
 holder=${FM_FAKE_TREEHOUSE_HOLDER_HELP:-$lease}
+get_json=${FM_FAKE_TREEHOUSE_GET_JSON_HELP:-$lease}
 status_json=${FM_FAKE_TREEHOUSE_STATUS_JSON_HELP:-$lease}
 conditional_return=${FM_FAKE_TREEHOUSE_CONDITIONAL_RETURN_HELP:-$lease}
+lease_id_return=${FM_FAKE_TREEHOUSE_LEASE_ID_RETURN_HELP:-$lease}
 case "${1:-}:${2:-}" in
   get:--help)
     out='Usage: treehouse get'
     [ "$lease" = 1 ] && out="$out [--lease]"
     [ "$holder" = 1 ] && out="$out [--lease-holder <holder>]"
+    [ "$get_json" = 1 ] && out="$out [--json]"
     printf '%s\n' "$out"
     ;;
   status:--help)
@@ -84,6 +87,7 @@ case "${1:-}:${2:-}" in
   return:--help)
     out='Usage: treehouse return'
     [ "$conditional_return" = 1 ] && out="$out [--if-lease-holder <holder>]"
+    [ "$lease_id_return" = 1 ] && out="$out [--if-lease-id <id>]"
     printf '%s\n' "$out"
     ;;
 esac
@@ -326,24 +330,28 @@ ROWS
 }
 
 test_treehouse_required_api_probe() {
-  local case_dir fakebin out label holder status_json conditional_return
+  local case_dir fakebin out label holder get_json status_json conditional_return lease_id_return
   case_dir="$TMP_ROOT/treehouse-required-apis"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  while IFS='|' read -r label holder status_json conditional_return; do
+  while IFS='|' read -r label holder get_json status_json conditional_return lease_id_return; do
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
       FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
       FM_FAKE_TREEHOUSE_HOLDER_HELP="$holder" \
+      FM_FAKE_TREEHOUSE_GET_JSON_HELP="$get_json" \
       FM_FAKE_TREEHOUSE_STATUS_JSON_HELP="$status_json" \
       FM_FAKE_TREEHOUSE_CONDITIONAL_RETURN_HELP="$conditional_return" \
+      FM_FAKE_TREEHOUSE_LEASE_ID_RETURN_HELP="$lease_id_return" \
       "$ROOT/bin/fm-bootstrap.sh")
     assert_contains "$out" "MISSING: treehouse" \
       "$label did not make bootstrap reject the incompatible Treehouse"
   done <<'ROWS'
-missing get lease-holder|0|1|1
-missing status json|1|0|1
-missing conditional return|1|1|0
+missing get lease-holder|0|1|1|1|1
+missing get json|1|0|1|1|1
+missing status json|1|1|0|1|1
+missing holder conditional return|1|1|1|0|1
+missing identity conditional return|1|1|1|1|0
 ROWS
   pass "bootstrap requires every Treehouse API used by worktree protection"
 }

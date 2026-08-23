@@ -27,6 +27,8 @@
 
 # shellcheck disable=SC2034 # Read by fm-spawn after acquisition returns.
 FM_TREEHOUSE_LEASE_PATH=
+# shellcheck disable=SC2034 # Read by acquisition callers after return.
+FM_TREEHOUSE_LEASE_ID=
 FM_TREEHOUSE_COLLISION_OWNER=
 FM_TREEHOUSE_COLLISION_ERROR=
 FM_TREEHOUSE_COLLISION_PATH_COUNT=0
@@ -38,8 +40,10 @@ FM_TREEHOUSE_ACQUIRE_START=
 FM_TREEHOUSE_ACQUIRE_STATE=
 FM_TREEHOUSE_ACQUIRE_PROJECT=
 FM_TREEHOUSE_ACQUIRE_HOLDER=
+FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
 FM_TREEHOUSE_ACQUIRE_RECEIPT=
 FM_TREEHOUSE_PENDING_LEASE_PATH=
+FM_TREEHOUSE_PENDING_LEASE_ID=
 FM_TREEHOUSE_RECOVERY_ERROR=
 FM_WORKTREE_META_ERROR=
 FM_WORKTREE_META_BACKEND=
@@ -256,7 +260,9 @@ fm_treehouse_active_acquire_stop() {
   local state=$FM_TREEHOUSE_ACQUIRE_STATE project=$FM_TREEHOUSE_ACQUIRE_PROJECT
   local holder=$FM_TREEHOUSE_ACQUIRE_HOLDER identity=$FM_TREEHOUSE_ACQUIRE_IDENTITY
   local receipt=$FM_TREEHOUSE_ACQUIRE_RECEIPT start=$FM_TREEHOUSE_ACQUIRE_START
-  local pending=$FM_TREEHOUSE_PENDING_LEASE_PATH current_identity reconcile_status=1
+  local operation_holder=$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER
+  local pending=$FM_TREEHOUSE_PENDING_LEASE_PATH lease_id=$FM_TREEHOUSE_PENDING_LEASE_ID
+  local current_identity reconcile_status=1
   if [ -n "$pid" ]; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
     if [ -z "$identity" ] && [ -n "$current_identity" ]; then
@@ -273,12 +279,12 @@ fm_treehouse_active_acquire_stop() {
     fi
     wait "$pid" 2>/dev/null || true
   fi
-  if [ -n "$project" ] && [ -n "$holder" ]; then
-    if [ -n "$pending" ] \
-      && fm_treehouse_lease_return_if_holder \
-        "$project" "$pending" "$holder" >/dev/null 2>&1; then
+  if [ -n "$project" ] && [ -n "$receipt" ]; then
+    if [ -n "$pending" ] && [ -n "$lease_id" ] \
+      && fm_treehouse_lease_return_if_id \
+        "$project" "$pending" "$lease_id" >/dev/null 2>&1; then
       reconcile_status=0
-    elif fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+    elif fm_treehouse_reconcile_recovery_receipt "$state" "$receipt"; then
       reconcile_status=0
     else
       reconcile_status=$?
@@ -286,7 +292,7 @@ fm_treehouse_active_acquire_stop() {
     if [ "$reconcile_status" -eq 0 ]; then
       fm_treehouse_recovery_receipt_clear "$receipt" || true
     else
-      echo "error: could not reconcile interrupted Treehouse lease holder '$holder'" >&2
+      echo "error: could not reconcile interrupted Treehouse acquisition '${operation_holder:-$holder}'" >&2
     fi
   fi
   FM_TREEHOUSE_ACQUIRE_PID=
@@ -296,8 +302,10 @@ fm_treehouse_active_acquire_stop() {
   FM_TREEHOUSE_ACQUIRE_STATE=
   FM_TREEHOUSE_ACQUIRE_PROJECT=
   FM_TREEHOUSE_ACQUIRE_HOLDER=
+  FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
   FM_TREEHOUSE_ACQUIRE_RECEIPT=
   FM_TREEHOUSE_PENDING_LEASE_PATH=
+  FM_TREEHOUSE_PENDING_LEASE_ID=
   [ -z "$output" ] || rm -f -- "$output"
   [ -z "$start" ] || rm -f -- "$start"
 }
@@ -322,17 +330,12 @@ fm_treehouse_acquire_context_clear() {
   FM_TREEHOUSE_ACQUIRE_STATE=
   FM_TREEHOUSE_ACQUIRE_PROJECT=
   FM_TREEHOUSE_ACQUIRE_HOLDER=
+  FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
   FM_TREEHOUSE_ACQUIRE_RECEIPT=
 }
 
-fm_treehouse_recovery_receipt_path() {  # <state-dir> <holder>
-  local state=$1 holder=$2
-  case "$holder" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  printf '%s/.treehouse-acquire-recovery/%s.receipt\n' "$state" "$holder"
-}
-
-fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
-  local state=$1 project=$2 holder=$3 dir receipt tmp
+fm_treehouse_recovery_receipt_publish() {  # <receipt> <holder> <operation-holder> <project> <lease-id> <lease-path>
+  local receipt=$1 holder=$2 operation_holder=$3 project=$4 lease_id=$5 lease_path=$6 tmp
   FM_TREEHOUSE_RECOVERY_ERROR=
   case "$project" in
     /*) ;;
@@ -341,17 +344,55 @@ fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
       return 1
       ;;
   esac
-  case "$project$holder" in
-    *$'\n'*)
-      FM_TREEHOUSE_RECOVERY_ERROR="project path or lease holder contains a newline"
+  case "$holder$operation_holder$project$lease_id$lease_path" in
+    *$'\n'*|*$'\t'*)
+      FM_TREEHOUSE_RECOVERY_ERROR="acquisition recovery value contains a newline or tab"
       return 1
       ;;
   esac
-  if ! receipt=$(fm_treehouse_recovery_receipt_path "$state" "$holder"); then
-    FM_TREEHOUSE_RECOVERY_ERROR="lease holder is unsafe: $holder"
+  case "$holder:$operation_holder" in
+    *[!A-Za-z0-9._:-]*)
+      FM_TREEHOUSE_RECOVERY_ERROR="lease holder is unsafe: $holder"
+      return 1
+      ;;
+  esac
+  if { [ -n "$lease_id" ] && [ -z "$lease_path" ]; } \
+    || { [ -z "$lease_id" ] && [ -n "$lease_path" ]; }; then
+    FM_TREEHOUSE_RECOVERY_ERROR="acquisition lease identity and path are incomplete"
     return 1
   fi
-  dir=${receipt%/*}
+  case "$lease_path" in ''|/*) ;; *)
+    FM_TREEHOUSE_RECOVERY_ERROR="acquisition lease path is not absolute: $lease_path"
+    return 1
+    ;;
+  esac
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || {
+    FM_TREEHOUSE_RECOVERY_ERROR="unsafe acquisition recovery receipt: $receipt"
+    return 1
+  }
+  tmp="$receipt.tmp.${BASHPID:-$$}"
+  if ! {
+    printf 'holder=%s\n' "$holder"
+    printf 'operation_holder=%s\n' "$operation_holder"
+    printf 'project=%s\n' "$project"
+    printf 'lease_id=%s\n' "$lease_id"
+    printf 'lease_path=%s\n' "$lease_path"
+  } > "$tmp" || ! mv -f -- "$tmp" "$receipt"; then
+    rm -f -- "$tmp"
+    FM_TREEHOUSE_RECOVERY_ERROR="could not publish acquisition recovery receipt: $receipt"
+    return 1
+  fi
+}
+
+fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
+  local state=$1 project=$2 holder=$3 dir receipt operation_holder attempt
+  FM_TREEHOUSE_RECOVERY_ERROR=
+  case "$holder" in ''|*[!A-Za-z0-9._:-]*)
+    FM_TREEHOUSE_RECOVERY_ERROR="lease holder is unsafe: $holder"
+    return 1
+    ;;
+  esac
+  dir="$state/.treehouse-acquire-recovery"
   if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
     FM_TREEHOUSE_RECOVERY_ERROR="unsafe acquisition recovery directory: $dir"
     return 1
@@ -361,15 +402,26 @@ fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
     return 1
   }
   chmod 700 "$dir" 2>/dev/null || true
-  tmp="$receipt.tmp.${BASHPID:-$$}"
-  if ! {
-    printf 'holder=%s\n' "$holder"
-    printf 'project=%s\n' "$project"
-  } > "$tmp" || ! mv -f -- "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
-    FM_TREEHOUSE_RECOVERY_ERROR="could not publish acquisition recovery receipt: $receipt"
+  receipt=
+  for attempt in 1 2 3; do
+    operation_holder="${holder}.acquire.$(node -e \
+      'process.stdout.write(require("crypto").randomUUID())')" || continue
+    receipt="$dir/$operation_holder.receipt"
+    if (set -C; : > "$receipt") 2>/dev/null; then
+      break
+    fi
+    receipt=
+  done
+  [ -n "$receipt" ] || {
+    FM_TREEHOUSE_RECOVERY_ERROR="could not allocate acquisition recovery receipt under $dir"
+    return 1
+  }
+  if ! fm_treehouse_recovery_receipt_publish \
+    "$receipt" "$holder" "$operation_holder" "$project" '' ''; then
+    rm -f -- "$receipt"
     return 1
   fi
+  FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=$operation_holder
   FM_TREEHOUSE_ACQUIRE_RECEIPT=$receipt
 }
 
@@ -386,8 +438,87 @@ fm_treehouse_recovery_record_value() {  # <record> <key>
   printf '%s\n' "$value"
 }
 
+fm_treehouse_allocation_parse() {  # <expected-holder>
+  local holder=$1
+  # shellcheck disable=SC2016 # JavaScript template expressions are literal shell input.
+  node -e '
+    let allocation;
+    try { allocation = JSON.parse(require("fs").readFileSync(0, "utf8")); }
+    catch { process.exit(2); }
+    const holder = process.argv[1];
+    if (!allocation || Array.isArray(allocation) ||
+        allocation.lease_holder !== holder ||
+        typeof allocation.lease_id !== "string" || !allocation.lease_id ||
+        allocation.lease_id.includes("\n") || allocation.lease_id.includes("\t") ||
+        typeof allocation.path !== "string" || !allocation.path.startsWith("/") ||
+        allocation.path.includes("\n") || allocation.path.includes("\t")) process.exit(2);
+    process.stdout.write(`${allocation.lease_id}\t${allocation.path}`);
+  ' "$holder"
+}
+
+fm_treehouse_recovery_status_match() {  # <operation-holder> <lease-id> <lease-path>
+  local operation_holder=$1 lease_id=$2 lease_path=$3
+  # shellcheck disable=SC2016 # JavaScript template expressions are literal shell input.
+  node -e '
+    let rows;
+    try { rows = JSON.parse(require("fs").readFileSync(0, "utf8")); }
+    catch { process.exit(2); }
+    if (!Array.isArray(rows)) process.exit(2);
+    const [holder, leaseID, leasePath] = process.argv.slice(1);
+    const valid = (row) => row &&
+      typeof row.lease_id === "string" && row.lease_id &&
+      !row.lease_id.includes("\n") && !row.lease_id.includes("\t") &&
+      typeof row.lease_holder === "string" &&
+      typeof row.path === "string" && row.path.startsWith("/") &&
+      !row.path.includes("\n") && !row.path.includes("\t");
+    let matches;
+    if (leaseID) {
+      matches = rows.filter((row) => row && row.lease_id === leaseID);
+      if (matches.length === 0) process.exit(0);
+      if (matches.length !== 1 || !valid(matches[0]) ||
+          matches[0].lease_holder !== holder ||
+          matches[0].path !== leasePath) process.exit(2);
+    } else {
+      matches = rows.filter((row) => row && row.lease_holder === holder);
+      if (matches.length === 0) process.exit(0);
+      if (matches.length !== 1 || !valid(matches[0])) process.exit(2);
+    }
+    process.stdout.write(`${matches[0].lease_id}\t${matches[0].path}`);
+  ' "$operation_holder" "$lease_id" "$lease_path"
+}
+
+fm_treehouse_reconcile_recovery_receipt() {  # <state-dir> <receipt>
+  local state=$1 receipt=$2 holder operation_holder project lease_id lease_path
+  local status_json match collision_status
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  holder=$(fm_treehouse_recovery_record_value "$receipt" holder) || return 1
+  operation_holder=$(fm_treehouse_recovery_record_value "$receipt" operation_holder) || return 1
+  project=$(fm_treehouse_recovery_record_value "$receipt" project) || return 1
+  lease_id=$(fm_treehouse_recovery_record_value "$receipt" lease_id) || return 1
+  lease_path=$(fm_treehouse_recovery_record_value "$receipt" lease_path) || return 1
+  [ "$(basename "$receipt" .receipt)" = "$operation_holder" ] || return 1
+  status_json=$(CDPATH='' cd -- "$project" && treehouse status --json) || return 1
+  match=$(printf '%s\n' "$status_json" \
+    | fm_treehouse_recovery_status_match "$operation_holder" "$lease_id" "$lease_path") \
+    || return 1
+  [ -n "$match" ] || return 0
+  lease_id=${match%%$'\t'*}
+  lease_path=${match#*$'\t'}
+  fm_treehouse_recovery_receipt_publish \
+    "$receipt" "$holder" "$operation_holder" "$project" "$lease_id" "$lease_path" \
+    || return 1
+  if fm_worktree_collision_owner "$state" "$lease_path"; then
+    return 0
+  else
+    collision_status=$?
+  fi
+  [ "$collision_status" -eq 1 ] || return 1
+  fm_treehouse_lease_return_if_id "$project" "$lease_path" "$lease_id" \
+    >/dev/null 2>&1
+}
+
 fm_treehouse_recovery_sweep() {  # <state-dir>
-  local state=$1 dir record filename holder project failed=0
+  local state=$1 dir record filename holder operation_holder project failed=0
   FM_TREEHOUSE_RECOVERY_ERROR=
   dir="$state/.treehouse-acquire-recovery"
   [ -e "$dir" ] || [ -L "$dir" ] || return 0
@@ -400,8 +531,9 @@ fm_treehouse_recovery_sweep() {  # <state-dir>
     filename=$(basename "$record" .receipt)
     if [ ! -f "$record" ] || [ -L "$record" ] \
       || ! holder=$(fm_treehouse_recovery_record_value "$record" holder) \
+      || ! operation_holder=$(fm_treehouse_recovery_record_value "$record" operation_holder) \
       || ! project=$(fm_treehouse_recovery_record_value "$record" project) \
-      || [ "$holder" != "$filename" ]; then
+      || [ "$operation_holder" != "$filename" ]; then
       echo "WORKTREE_PROTECTION: acquisition recovery ${filename:-unknown}: failed: unsafe recovery receipt"
       failed=1
       continue
@@ -414,7 +546,7 @@ fm_treehouse_recovery_sweep() {  # <state-dir>
         continue
         ;;
     esac
-    if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+    if fm_treehouse_reconcile_recovery_receipt "$state" "$record"; then
       if ! fm_treehouse_recovery_receipt_clear "$record"; then
         echo "WORKTREE_PROTECTION: acquisition recovery $holder: failed: could not retire recovery receipt"
         failed=1
@@ -427,49 +559,15 @@ fm_treehouse_recovery_sweep() {  # <state-dir>
   [ "$failed" -eq 0 ]
 }
 
-fm_treehouse_holder_lease_paths() {  # <holder>
-  local holder=$1
-  node -e '
-    let rows;
-    try { rows = JSON.parse(require("fs").readFileSync(0, "utf8")); }
-    catch { process.exit(2); }
-    if (!Array.isArray(rows)) process.exit(2);
-    const holder = process.argv[1];
-    for (const row of rows) {
-      if (!row || row.lease_holder !== holder) continue;
-      if (typeof row.lease_id !== "string" || !row.lease_id ||
-          typeof row.path !== "string" || !row.path.startsWith("/") ||
-          row.path.includes("\n")) process.exit(2);
-      process.stdout.write(`${row.path}\n`);
-    }
-  ' "$holder"
-}
-
-fm_treehouse_reconcile_holder_leases() {  # <state-dir> <project-dir> <holder>
-  local state=$1 project=$2 holder=$3 status_json paths path collision_status
-  status_json=$(CDPATH='' cd -- "$project" && treehouse status --json) || return 1
-  paths=$(printf '%s\n' "$status_json" | fm_treehouse_holder_lease_paths "$holder") \
-    || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    if fm_worktree_collision_owner "$state" "$path"; then
-      continue
-    else
-      collision_status=$?
-    fi
-    [ "$collision_status" -eq 1 ] || return 1
-    fm_treehouse_lease_return_if_holder "$project" "$path" "$holder" \
-      >/dev/null 2>&1 || return 1
-  done <<< "$paths"
-}
-
 fm_treehouse_lease_transfer() {  # <project-dir> <path> <holder>
   local project=$1 path=$2 holder=$3
   [ "$FM_TREEHOUSE_PENDING_LEASE_PATH" = "$path" ] \
+    && [ -n "$FM_TREEHOUSE_PENDING_LEASE_ID" ] \
     && [ "$FM_TREEHOUSE_ACQUIRE_PROJECT" = "$project" ] \
     && [ "$FM_TREEHOUSE_ACQUIRE_HOLDER" = "$holder" ] || return 1
   fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || return 1
   FM_TREEHOUSE_PENDING_LEASE_PATH=
+  FM_TREEHOUSE_PENDING_LEASE_ID=
   fm_treehouse_acquire_context_clear
 }
 
@@ -545,7 +643,9 @@ fm_treehouse_acquire_barrier_start() {  # <state-dir>
 fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder>
   local state=$1 project=$2 holder=$3 attempts attempt=0 candidate candidate_real
   local rejected=0 rejected_paths=$'\n' collision_status acquire_status identity previous_identity _
+  local allocation lease_id
   FM_TREEHOUSE_LEASE_PATH=
+  FM_TREEHOUSE_LEASE_ID=
   [ -z "$FM_TREEHOUSE_PENDING_LEASE_PATH" ] || {
     echo "error: a prior Treehouse lease is still awaiting ownership transfer" >&2
     return 1
@@ -566,14 +666,14 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     fm_treehouse_acquire_context_clear
     return 1
   }
-  if ! fm_treehouse_recovery_receipt_write "$state" "$project" "$holder"; then
-    fm_treehouse_acquire_barrier_stop
-    fm_treehouse_acquire_context_clear
-    echo "error: cannot establish durable Treehouse acquisition cleanup ownership: $FM_TREEHOUSE_RECOVERY_ERROR" >&2
-    return 1
-  fi
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
+    if ! fm_treehouse_recovery_receipt_write "$state" "$project" "$holder"; then
+      fm_treehouse_acquire_barrier_stop
+      fm_treehouse_acquire_context_clear
+      echo "error: cannot establish durable Treehouse acquisition cleanup ownership: $FM_TREEHOUSE_RECOVERY_ERROR" >&2
+      return 1
+    fi
     FM_TREEHOUSE_ACQUIRE_OUTPUT=$(mktemp "$state/.treehouse-acquire.XXXXXX") || {
       fm_treehouse_acquire_barrier_stop
       fm_treehouse_acquire_context_clear
@@ -611,7 +711,8 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       while [ ! -e "$FM_TREEHOUSE_ACQUIRE_START" ]; do sleep 0.01; done
       rm -f -- "$FM_TREEHOUSE_ACQUIRE_START"
       CDPATH='' cd -- "$project" || exit 1
-      treehouse get --lease --lease-holder "$holder" &
+      treehouse get --lease --json \
+        --lease-holder "$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER" &
       treehouse_pid=$!
       previous_identity=
       for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -659,7 +760,7 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     FM_TREEHOUSE_ACQUIRE_PID=
     FM_TREEHOUSE_ACQUIRE_IDENTITY=
     fm_treehouse_acquire_start_clear
-    candidate=$(< "$FM_TREEHOUSE_ACQUIRE_OUTPUT")
+    allocation=$(< "$FM_TREEHOUSE_ACQUIRE_OUTPUT")
     if [ "$acquire_status" -ne 0 ]; then
       fm_treehouse_active_acquire_stop
       fm_treehouse_acquire_barrier_stop
@@ -670,20 +771,30 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       fi
       return 1
     fi
-    case "$candidate" in
-      /*$'\n'*|''|[!/]*)
-        fm_treehouse_active_acquire_stop
-        fm_treehouse_acquire_barrier_stop
-        echo "error: treehouse get --lease returned a non-absolute worktree path: '${candidate:-empty}'" >&2
-        return 1
-        ;;
-      /*) ;;
-    esac
+    if ! allocation=$(printf '%s\n' "$allocation" \
+      | fm_treehouse_allocation_parse "$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER"); then
+      fm_treehouse_active_acquire_stop
+      fm_treehouse_acquire_barrier_stop
+      echo "error: treehouse get --lease --json returned an invalid allocation" >&2
+      return 1
+    fi
+    lease_id=${allocation%%$'\t'*}
+    candidate=${allocation#*$'\t'}
+    if ! fm_treehouse_recovery_receipt_publish \
+      "$FM_TREEHOUSE_ACQUIRE_RECEIPT" "$holder" \
+      "$FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER" "$project" "$lease_id" "$candidate"; then
+      fm_treehouse_acquire_output_clear
+      fm_treehouse_acquire_barrier_stop
+      fm_treehouse_acquire_context_clear
+      echo "error: cannot persist exact Treehouse acquisition identity: $FM_TREEHOUSE_RECOVERY_ERROR" >&2
+      return 1
+    fi
     if fm_worktree_collision_owner "$state" "$candidate"; then
       candidate_real=$(fm_worktree_real_or_raw "$candidate")
       case "$rejected_paths" in
         *$'\n'"$candidate_real"$'\n'*)
-          if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+          if fm_treehouse_reconcile_recovery_receipt \
+            "$state" "$FM_TREEHOUSE_ACQUIRE_RECEIPT"; then
             fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || true
           fi
           fm_treehouse_acquire_output_clear
@@ -696,6 +807,9 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       rejected_paths="${rejected_paths}${candidate_real}"$'\n'
       rejected=$((rejected + 1))
       echo "warning: treehouse returned pre-excluded recorded live task worktree '$candidate' owned by $FM_TREEHOUSE_COLLISION_OWNER; preserving that durable lease and redrawing ($attempt/$attempts)" >&2
+      fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || true
+      FM_TREEHOUSE_ACQUIRE_OPERATION_HOLDER=
+      FM_TREEHOUSE_ACQUIRE_RECEIPT=
       fm_treehouse_acquire_output_clear
       continue
     else
@@ -709,13 +823,17 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       fi
     fi
     FM_TREEHOUSE_PENDING_LEASE_PATH=$candidate
+    FM_TREEHOUSE_PENDING_LEASE_ID=$lease_id
     fm_treehouse_acquire_output_clear
     # shellcheck disable=SC2034 # Read by fm-spawn after this function returns.
     FM_TREEHOUSE_LEASE_PATH=$candidate
+    # shellcheck disable=SC2034 # Read by acquisition callers after return.
+    FM_TREEHOUSE_LEASE_ID=$lease_id
     fm_treehouse_acquire_barrier_stop
     return 0
   done
-  if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+  if fm_treehouse_reconcile_recovery_receipt \
+    "$state" "$FM_TREEHOUSE_ACQUIRE_RECEIPT"; then
     fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || true
   fi
   fm_treehouse_acquire_barrier_stop
@@ -728,6 +846,12 @@ fm_treehouse_lease_return_if_holder() {  # <project-dir> <path> <holder>
   local project=$1 path=$2 holder=$3
   (CDPATH='' cd -- "$project" \
     && treehouse return --force --if-lease-holder "$holder" "$path")
+}
+
+fm_treehouse_lease_return_if_id() {  # <project-dir> <path> <lease-id>
+  local project=$1 path=$2 lease_id=$3
+  (CDPATH='' cd -- "$project" \
+    && treehouse return --force --if-lease-id "$lease_id" "$path")
 }
 
 fm_worktree_protection_record_value() {  # <record> <key>
@@ -880,7 +1004,7 @@ fm_worktree_process_matches_harness() {  # <comm> <args> <harness>
 
 fm_worktree_structural_protection_mode() {  # <meta> <process-pids> <protection-dir>
   local meta=$1 process_pids=$2 protection_dir=$3 harness record guard_pid pid
-  local ignored_pids=$'\n' agent_found=0 uncertain_pid= cwd
+  local ignored_pids=$'\n' agent_found=0 uncertain_pid='' cwd
   harness=$(fm_meta_get "$meta" harness)
   [ -n "$harness" ] || {
     FM_WORKTREE_PROTECTION_ERROR="recorded worktree has no harness identity: $FM_WORKTREE_PROTECTION_WORKTREE"

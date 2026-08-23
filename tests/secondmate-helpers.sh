@@ -13,7 +13,7 @@
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
 # treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder
-# to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
+# and identity to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
 # FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Echoes the fakebin dir.
 make_fake_tmux() {
   local dir=$1 fakebin capture
@@ -66,18 +66,22 @@ worktree_in_use() {
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
   get)
-    # Durable lease: print only the worktree path to stdout (banners to stderr),
-    # and record the lease holder so tests can assert it is set and later cleared.
+    # Durable lease: print the allocation JSON to stdout (banners to stderr),
+    # and record the lease holder and identity so tests can assert later cleanup.
     shift
     holder=
+    saw_json=0
+    count=1
     while [ $# -gt 0 ]; do
       case "$1" in
         --lease) ;;
+        --json) saw_json=1 ;;
         --lease-holder) shift; holder=${1:-} ;;
         --lease-holder=*) holder=${1#--lease-holder=} ;;
       esac
       shift
     done
+    [ "$saw_json" -eq 1 ] || exit 18
     path=${FM_FAKE_TREEHOUSE_HOME:-}
     if [ -n "${FM_FAKE_TREEHOUSE_SEQUENCE:-}" ]; then
       count=0
@@ -93,9 +97,12 @@ case "${1:-}" in
         : > "${FM_FAKE_TREEHOUSE_PREACQUIRE_VIOLATION:?FM_FAKE_TREEHOUSE_PREACQUIRE_VIOLATION unset}"
       fi
       mkdir -p "$path"
-      [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+      lease_id="fake-lease-$count"
+      [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] \
+        && printf '%s\n%s\n' "$holder" "$lease_id" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
       printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
-      printf '%s\n' "$path"
+      printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' \
+        "$path" "$lease_id" "$holder"
     fi
     exit 0
     ;;

@@ -679,6 +679,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_ABORT_CLEANUP=0
 TREEHOUSE_LEASE_HOLDER=
+TREEHOUSE_LEASE_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -793,8 +794,8 @@ spawn_abort_cleanup() {
   fi
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
-    if ! fm_treehouse_lease_return_if_holder \
-      "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_HOLDER" >/dev/null 2>&1; then
+    if ! fm_treehouse_lease_return_if_id \
+      "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_ID" >/dev/null 2>&1; then
       echo "warning: could not release unpublished durable Treehouse lease '$WT' for $ID" >&2
     fi
   fi
@@ -1868,6 +1869,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
   fm_treehouse_lease_acquire_noncolliding \
     "$STATE" "$PROJ_ABS" "$TREEHOUSE_LEASE_HOLDER" || exit 1
   WT=$FM_TREEHOUSE_LEASE_PATH
+  TREEHOUSE_LEASE_ID=$FM_TREEHOUSE_LEASE_ID
   TREEHOUSE_ABORT_CLEANUP=1
   fm_treehouse_lease_transfer \
     "$PROJ_ABS" "$WT" "$TREEHOUSE_LEASE_HOLDER" || exit 1

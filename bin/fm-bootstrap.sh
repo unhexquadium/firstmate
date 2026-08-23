@@ -816,8 +816,10 @@ treehouse_help_has_flag() {
 treehouse_supports_required_apis() {
   treehouse_help_has_flag get --lease \
     && treehouse_help_has_flag get --lease-holder \
+    && treehouse_help_has_flag get --json \
     && treehouse_help_has_flag status --json \
-    && treehouse_help_has_flag return --if-lease-holder
+    && treehouse_help_has_flag return --if-lease-holder \
+    && treehouse_help_has_flag return --if-lease-id
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that

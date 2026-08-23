@@ -70,19 +70,23 @@ SH
 #!/usr/bin/env bash
 [ "${1:-}" = get ] && [ "${2:-}" = --lease ] || exit 1
 holder=
+saw_json=0
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = --lease-holder ]; then
-    shift
-    holder=${1:-}
-  fi
+  case "$1" in
+    --json) saw_json=1 ;;
+    --lease-holder) shift; holder=${1:-} ;;
+  esac
   shift
 done
+[ "$saw_json" -eq 1 ] || exit 1
 path=${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}
-if [ -n "${FM_FAKE_SECOND_HOLDER:-}" ] && [ "$holder" = "$FM_FAKE_SECOND_HOLDER" ]; then
+base_holder=${holder%%.acquire.*}
+if [ -n "${FM_FAKE_SECOND_HOLDER:-}" ] && [ "$base_holder" = "$FM_FAKE_SECOND_HOLDER" ]; then
   path=${FM_FAKE_SECOND_PANE_PATH:?FM_FAKE_SECOND_PANE_PATH unset}
 fi
 [ -z "${FM_FAKE_ACTIVE_PANE_FILE:-}" ] || printf '%s\n' "$path" > "$FM_FAKE_ACTIVE_PANE_FILE"
-printf '%s\n' "$path"
+printf '{"path":"%s","lease_id":"fake-lease","lease_holder":"%s"}\n' \
+  "$path" "$holder"
 SH
   chmod +x "$fakebin/treehouse"
   cat > "$fakebin/timeout" <<'SH'

@@ -58,20 +58,25 @@ case "${1:-}" in
   get)
     shift
     saw_lease=0
+    saw_json=0
     saw_holder=0
     holder=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --lease) saw_lease=1 ;;
+        --json) saw_json=1 ;;
         --lease-holder)
           shift
           holder=${1:-}
-          [ "$holder" = "${FM_FAKE_EXPECT_HOLDER:-}" ] && saw_holder=1
+          case "$holder" in
+            "${FM_FAKE_EXPECT_HOLDER:-}".acquire.*) saw_holder=1 ;;
+          esac
           ;;
       esac
       shift
     done
     [ "$saw_lease" -eq 1 ] || exit 41
+    [ "$saw_json" -eq 1 ] || exit 46
     [ "$saw_holder" -eq 1 ] || exit 42
     count=0
     [ ! -f "$FM_FAKE_TREEHOUSE_COUNT" ] || count=$(cat "$FM_FAKE_TREEHOUSE_COUNT")
@@ -84,7 +89,8 @@ case "${1:-}" in
       : > "${FM_FAKE_PREACQUIRE_VIOLATION:?FM_FAKE_PREACQUIRE_VIOLATION unset}"
     fi
     if [ -n "${FM_FAKE_LEASE_STATE:-}" ]; then
-      printf '%s\n%s\n' "$holder" "$path" > "$FM_FAKE_LEASE_STATE"
+      lease_id="fake-lease-$count"
+      printf '%s\n%s\n%s\n' "$lease_id" "$holder" "$path" > "$FM_FAKE_LEASE_STATE"
     fi
     if [ "${FM_FAKE_BLOCK_GET:-0}" = 1 ] && [ "$count" -eq 1 ]; then
       worktree_pids "${FM_FAKE_PROTECTED_PATH:?FM_FAKE_PROTECTED_PATH unset}" \
@@ -105,24 +111,47 @@ case "${1:-}" in
         done
       fi
     fi
-    printf '%s\n' "$path"
+    lease_id=${lease_id:-"fake-lease-$count"}
+    printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' \
+      "$path" "$lease_id" "$holder"
     ;;
   status)
     [ "${2:-}" = --json ] || exit 43
     [ "${FM_FAKE_STATUS_FAIL:-0}" != 1 ] || exit 45
-    if [ -n "${FM_FAKE_LEASE_STATE:-}" ] && [ -s "$FM_FAKE_LEASE_STATE" ]; then
-      lease_holder=$(sed -n '1p' "$FM_FAKE_LEASE_STATE")
-      lease_path=$(sed -n '2p' "$FM_FAKE_LEASE_STATE")
-      printf '[{"path":"%s","lease_id":"fake-lease","lease_holder":"%s","processes":[]}]\n' \
-        "$lease_path" "$lease_holder"
-    else
-      printf '[]\n'
-    fi
+    rows=
+    for state_file in "${FM_FAKE_LEASE_STATE:-}" "${FM_FAKE_UNRELATED_LEASE_STATE:-}"; do
+      [ -n "$state_file" ] && [ -s "$state_file" ] || continue
+      lease_id=$(sed -n '1p' "$state_file")
+      lease_holder=$(sed -n '2p' "$state_file")
+      lease_path=$(sed -n '3p' "$state_file")
+      row=$(printf '{"path":"%s","lease_id":"%s","lease_holder":"%s","processes":[]}' \
+        "$lease_path" "$lease_id" "$lease_holder")
+      rows="${rows}${rows:+,}${row}"
+    done
+    printf '[%s]\n' "$rows"
     ;;
   return)
-    if [ -n "${FM_FAKE_LEASE_STATE:-}" ]; then
-      : > "$FM_FAKE_LEASE_STATE"
-    fi
+    shift
+    expected_id=
+    target=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --force) ;;
+        --if-lease-id) shift; expected_id=${1:-} ;;
+        --if-lease-holder) shift ;;
+        *) target=$1 ;;
+      esac
+      shift
+    done
+    for state_file in "${FM_FAKE_LEASE_STATE:-}" "${FM_FAKE_UNRELATED_LEASE_STATE:-}"; do
+      [ -n "$state_file" ] && [ -s "$state_file" ] || continue
+      lease_id=$(sed -n '1p' "$state_file")
+      lease_path=$(sed -n '3p' "$state_file")
+      if [ -n "$expected_id" ] && [ "$lease_id" = "$expected_id" ] \
+        && [ "$lease_path" = "$target" ]; then
+        : > "$state_file"
+      fi
+    done
     exit 0
     ;;
   *) exit 43 ;;
@@ -228,6 +257,7 @@ run_spawn() {
     FM_FAKE_UNREADABLE_META_AFTER="${FM_FAKE_UNREADABLE_META_AFTER:-}" \
     FM_FAKE_UNREADABLE_META_COUNT="${FM_FAKE_UNREADABLE_META_COUNT:-}" \
     FM_FAKE_LEASE_STATE="${FM_FAKE_LEASE_STATE:-}" \
+    FM_FAKE_UNRELATED_LEASE_STATE="${FM_FAKE_UNRELATED_LEASE_STATE:-}" \
     FM_FAKE_STATUS_FAIL="${FM_FAKE_STATUS_FAIL:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
@@ -355,12 +385,12 @@ test_unpublished_lease_is_returned_on_abort() {
   [ "$status" -ne 0 ] || fail "spawn succeeded with a dirty accepted worktree"
   assert_contains "$out" "is not clean" \
     "dirty accepted worktree did not reach the pre-publication abort path"
-  assert_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+  assert_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
     "$CASE_DIR/treehouse.log" \
-    "spawn abort did not holder-conditionally return its unpublished lease"
+    "spawn abort did not identity-conditionally return its unpublished lease"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "aborted spawn published metadata for its returned lease"
-  pass "an accepted lease is holder-conditionally returned when spawn aborts before publication"
+  pass "an accepted lease is identity-conditionally returned when spawn aborts before publication"
 }
 
 test_unreadable_metadata_refuses_before_acquisition() {
@@ -404,12 +434,13 @@ test_postcheck_read_failure_preserves_candidate() {
   [ "$status" -ne 0 ] || fail "spawn accepted a candidate after metadata became unreadable"
   assert_contains "$out" "cannot verify durable Treehouse lease '$COLLISION_DIR'" \
     "post-acquisition metadata failure did not fail loudly"
-  assert_no_grep "return --force --if-lease-holder fm-$id $COLLISION_DIR" \
+  assert_no_grep "return --force --if-lease-id fake-lease-1 $COLLISION_DIR" \
     "$CASE_DIR/treehouse.log" \
     "post-acquisition metadata failure force-returned an unverified live path"
   [ -s "$CASE_DIR/lease-state" ] \
     || fail "post-acquisition metadata failure discarded the uncertain lease"
-  receipt="$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.receipt"
+  receipt=$(printf '%s\n' \
+    "$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.acquire."*.receipt)
   assert_present "$receipt" \
     "post-acquisition metadata failure did not retain a durable cleanup owner"
   pass "post-acquisition metadata uncertainty preserves the candidate lease"
@@ -446,13 +477,17 @@ test_pre_gate_cleanup_owns_wrapper() {
 
 test_interrupted_acquisition_reaps_barrier() {
   local rec id spawn_pid barrier_pid barrier_identity current_identity status _
-  local treehouse_identity current_treehouse_identity receipt bootstrap_out
+  local treehouse_identity current_treehouse_identity receipt bootstrap_out unrelated
   id=lease-interrupt-r5
   rec=$(make_case interrupt "$id")
   read_case_record "$rec"
   fm_write_meta "$HOME_DIR/state/live-owner.meta" \
     'window=firstmate:fm-live-owner' "worktree=$COLLISION_DIR" \
     "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
+  unrelated="$CASE_DIR/unrelated"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$unrelated"
+  printf '%s\n%s\n%s\n' "unrelated-lease" "fm-$id" "$unrelated" \
+    > "$CASE_DIR/unrelated-lease-state"
   : > "$CASE_DIR/treehouse.log"
   printf '%s\n' "$SAFE_DIR" > "$CASE_DIR/treehouse.sequence"
   printf '%s\n' "$COLLISION_DIR" > "$CASE_DIR/protected-paths"
@@ -470,6 +505,7 @@ test_interrupted_acquisition_reaps_barrier() {
     FM_FAKE_EXPECT_HOLDER="fm-$id" FM_FAKE_BLOCK_GET=1 \
     FM_FAKE_STATUS_FAIL=1 \
     FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_UNRELATED_LEASE_STATE="$CASE_DIR/unrelated-lease-state" \
     FM_FAKE_REAL_CAT="$SYSTEM_CAT" \
     FM_FAKE_BLOCK_READY="$CASE_DIR/block-ready" \
     FM_FAKE_BARRIER_PID_FILE="$CASE_DIR/barrier.pid" \
@@ -522,10 +558,11 @@ test_interrupted_acquisition_reaps_barrier() {
     "interrupted acquisition published task metadata"
   [ -s "$CASE_DIR/lease-state" ] \
     || fail "failed interruption reconciliation lost its durable lease evidence"
-  receipt="$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.receipt"
+  receipt=$(printf '%s\n' \
+    "$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.acquire."*.receipt)
   assert_present "$receipt" \
     "failed interruption reconciliation dropped its cleanup owner"
-  assert_no_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+  assert_no_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
     "$CASE_DIR/treehouse.log" \
     "failed reconciliation returned an unreconciled durable lease"
 
@@ -541,6 +578,7 @@ test_interrupted_acquisition_reaps_barrier() {
     FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
     FM_FAKE_EXPECT_HOLDER="fm-$id" \
     FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_UNRELATED_LEASE_STATE="$CASE_DIR/unrelated-lease-state" \
     FM_FAKE_REAL_CAT="$SYSTEM_CAT" PATH="$FAKEBIN_DIR:$PATH" \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1)
   assert_not_contains "$bootstrap_out" 'acquisition recovery fm-' \
@@ -549,9 +587,14 @@ test_interrupted_acquisition_reaps_barrier() {
     "locked bootstrap retained a successfully reconciled acquisition receipt"
   [ ! -s "$CASE_DIR/lease-state" ] \
     || fail "locked bootstrap left the unpublished durable lease held"
-  assert_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+  assert_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
     "$CASE_DIR/treehouse.log" \
     "locked bootstrap did not return the recovered unpublished lease"
+  [ -s "$CASE_DIR/unrelated-lease-state" ] \
+    || fail "recovery returned an unrelated lease with the same human holder"
+  assert_no_grep "return --force --if-lease-id unrelated-lease $unrelated" \
+    "$CASE_DIR/treehouse.log" \
+    "recovery targeted an unrelated lease with the same human holder"
   pass "interruption persists and bootstrap reconciles durable cleanup ownership"
 }
 
@@ -606,7 +649,7 @@ test_post_success_signal_returns_pending_lease() {
   fi
   BLOCKED_SPAWN_PID=
   [ "$helper_status" -ne 0 ] || fail "pending-lease interruption reported success"
-  assert_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+  assert_grep "return --force --if-lease-id fake-lease-1 $SAFE_DIR" \
     "$CASE_DIR/treehouse.log" \
     "signal after acquisition success orphaned the pending durable lease"
   pass "post-success interruption returns the pending durable lease"
