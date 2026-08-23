@@ -38,7 +38,9 @@ FM_TREEHOUSE_ACQUIRE_START=
 FM_TREEHOUSE_ACQUIRE_STATE=
 FM_TREEHOUSE_ACQUIRE_PROJECT=
 FM_TREEHOUSE_ACQUIRE_HOLDER=
+FM_TREEHOUSE_ACQUIRE_RECEIPT=
 FM_TREEHOUSE_PENDING_LEASE_PATH=
+FM_TREEHOUSE_RECOVERY_ERROR=
 FM_WORKTREE_META_ERROR=
 FM_WORKTREE_META_BACKEND=
 FM_WORKTREE_META_REMOTE_HOST=
@@ -253,53 +255,39 @@ fm_treehouse_active_acquire_stop() {
   local pid=$FM_TREEHOUSE_ACQUIRE_PID output=$FM_TREEHOUSE_ACQUIRE_OUTPUT
   local state=$FM_TREEHOUSE_ACQUIRE_STATE project=$FM_TREEHOUSE_ACQUIRE_PROJECT
   local holder=$FM_TREEHOUSE_ACQUIRE_HOLDER identity=$FM_TREEHOUSE_ACQUIRE_IDENTITY
-  local start=$FM_TREEHOUSE_ACQUIRE_START candidate pending=0 collision_status
-  local current_identity reconcile_status=1
-  if [ -n "$pid" ] && [ -n "$identity" ]; then
+  local receipt=$FM_TREEHOUSE_ACQUIRE_RECEIPT start=$FM_TREEHOUSE_ACQUIRE_START
+  local pending=$FM_TREEHOUSE_PENDING_LEASE_PATH current_identity reconcile_status=1
+  if [ -n "$pid" ]; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
-    if [ "$current_identity" = "$identity" ]; then
+    if [ -z "$identity" ] && [ -n "$current_identity" ]; then
+      identity=$current_identity
+      FM_TREEHOUSE_ACQUIRE_IDENTITY=$identity
+    fi
+    if [ -n "$identity" ] && [ "$current_identity" = "$identity" ]; then
       kill -TERM "$pid" 2>/dev/null || true
     fi
     sleep 0.1
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
-    if [ "$current_identity" = "$identity" ]; then
+    if [ -n "$identity" ] && [ "$current_identity" = "$identity" ]; then
       kill -KILL "$pid" 2>/dev/null || true
     fi
     wait "$pid" 2>/dev/null || true
   fi
-  if [ -n "$FM_TREEHOUSE_PENDING_LEASE_PATH" ]; then
-    candidate=$FM_TREEHOUSE_PENDING_LEASE_PATH
-    pending=1
-  elif [ -n "$output" ] && [ -f "$output" ]; then
-    candidate=$(< "$output")
-  fi
-  if [ -z "$candidate" ] && [ -n "$project" ] && [ -n "$holder" ]; then
-    if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+  if [ -n "$project" ] && [ -n "$holder" ]; then
+    if [ -n "$pending" ] \
+      && fm_treehouse_lease_return_if_holder \
+        "$project" "$pending" "$holder" >/dev/null 2>&1; then
+      reconcile_status=0
+    elif fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
       reconcile_status=0
     else
       reconcile_status=$?
     fi
-    if [ "$reconcile_status" -ne 0 ]; then
+    if [ "$reconcile_status" -eq 0 ]; then
+      fm_treehouse_recovery_receipt_clear "$receipt" || true
+    else
       echo "error: could not reconcile interrupted Treehouse lease holder '$holder'" >&2
     fi
-  elif [ -n "$candidate" ] && [ -n "$project" ] && [ -n "$holder" ]; then
-    case "$candidate" in
-      /*$'\n'*|[!/]*|"") ;;
-      /*)
-        if [ "$pending" -eq 1 ]; then
-          fm_treehouse_lease_return_if_holder \
-            "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
-        elif fm_worktree_collision_owner "$state" "$candidate"; then
-          :
-        else
-          collision_status=$?
-          if [ "$collision_status" -eq 1 ]; then
-            fm_treehouse_lease_return_if_holder \
-              "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
-          fi
-        fi
-        ;;
-    esac
   fi
   FM_TREEHOUSE_ACQUIRE_PID=
   FM_TREEHOUSE_ACQUIRE_IDENTITY=
@@ -308,6 +296,7 @@ fm_treehouse_active_acquire_stop() {
   FM_TREEHOUSE_ACQUIRE_STATE=
   FM_TREEHOUSE_ACQUIRE_PROJECT=
   FM_TREEHOUSE_ACQUIRE_HOLDER=
+  FM_TREEHOUSE_ACQUIRE_RECEIPT=
   FM_TREEHOUSE_PENDING_LEASE_PATH=
   [ -z "$output" ] || rm -f -- "$output"
   [ -z "$start" ] || rm -f -- "$start"
@@ -333,6 +322,109 @@ fm_treehouse_acquire_context_clear() {
   FM_TREEHOUSE_ACQUIRE_STATE=
   FM_TREEHOUSE_ACQUIRE_PROJECT=
   FM_TREEHOUSE_ACQUIRE_HOLDER=
+  FM_TREEHOUSE_ACQUIRE_RECEIPT=
+}
+
+fm_treehouse_recovery_receipt_path() {  # <state-dir> <holder>
+  local state=$1 holder=$2
+  case "$holder" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s/.treehouse-acquire-recovery/%s.receipt\n' "$state" "$holder"
+}
+
+fm_treehouse_recovery_receipt_write() {  # <state-dir> <project-dir> <holder>
+  local state=$1 project=$2 holder=$3 dir receipt tmp
+  FM_TREEHOUSE_RECOVERY_ERROR=
+  case "$project" in
+    /*) ;;
+    *)
+      FM_TREEHOUSE_RECOVERY_ERROR="project path is not absolute: $project"
+      return 1
+      ;;
+  esac
+  case "$project$holder" in
+    *$'\n'*)
+      FM_TREEHOUSE_RECOVERY_ERROR="project path or lease holder contains a newline"
+      return 1
+      ;;
+  esac
+  if ! receipt=$(fm_treehouse_recovery_receipt_path "$state" "$holder"); then
+    FM_TREEHOUSE_RECOVERY_ERROR="lease holder is unsafe: $holder"
+    return 1
+  fi
+  dir=${receipt%/*}
+  if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+    FM_TREEHOUSE_RECOVERY_ERROR="unsafe acquisition recovery directory: $dir"
+    return 1
+  fi
+  mkdir -p "$dir" || {
+    FM_TREEHOUSE_RECOVERY_ERROR="could not create acquisition recovery directory: $dir"
+    return 1
+  }
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp="$receipt.tmp.${BASHPID:-$$}"
+  if ! {
+    printf 'holder=%s\n' "$holder"
+    printf 'project=%s\n' "$project"
+  } > "$tmp" || ! mv -f -- "$tmp" "$receipt"; then
+    rm -f -- "$tmp"
+    FM_TREEHOUSE_RECOVERY_ERROR="could not publish acquisition recovery receipt: $receipt"
+    return 1
+  fi
+  FM_TREEHOUSE_ACQUIRE_RECEIPT=$receipt
+}
+
+fm_treehouse_recovery_receipt_clear() {  # <receipt>
+  local receipt=$1
+  [ -z "$receipt" ] || rm -f -- "$receipt"
+}
+
+fm_treehouse_recovery_record_value() {  # <record> <key>
+  local record=$1 key=$2 count value
+  count=$(grep -c "^${key}=" "$record" 2>/dev/null) || return 1
+  [ "$count" -eq 1 ] || return 1
+  value=$(sed -n "s/^${key}=//p" "$record" 2>/dev/null) || return 1
+  printf '%s\n' "$value"
+}
+
+fm_treehouse_recovery_sweep() {  # <state-dir>
+  local state=$1 dir record filename holder project failed=0
+  FM_TREEHOUSE_RECOVERY_ERROR=
+  dir="$state/.treehouse-acquire-recovery"
+  [ -e "$dir" ] || [ -L "$dir" ] || return 0
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    echo "WORKTREE_PROTECTION: failed: unsafe acquisition recovery directory: $dir"
+    return 1
+  fi
+  for record in "$dir"/*.receipt; do
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    filename=$(basename "$record" .receipt)
+    if [ ! -f "$record" ] || [ -L "$record" ] \
+      || ! holder=$(fm_treehouse_recovery_record_value "$record" holder) \
+      || ! project=$(fm_treehouse_recovery_record_value "$record" project) \
+      || [ "$holder" != "$filename" ]; then
+      echo "WORKTREE_PROTECTION: acquisition recovery ${filename:-unknown}: failed: unsafe recovery receipt"
+      failed=1
+      continue
+    fi
+    case "$project" in
+      /*) ;;
+      *)
+        echo "WORKTREE_PROTECTION: acquisition recovery $holder: failed: invalid project path"
+        failed=1
+        continue
+        ;;
+    esac
+    if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+      if ! fm_treehouse_recovery_receipt_clear "$record"; then
+        echo "WORKTREE_PROTECTION: acquisition recovery $holder: failed: could not retire recovery receipt"
+        failed=1
+      fi
+    else
+      echo "WORKTREE_PROTECTION: acquisition recovery $holder: failed: lease reconciliation remains pending"
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ]
 }
 
 fm_treehouse_holder_lease_paths() {  # <holder>
@@ -376,6 +468,7 @@ fm_treehouse_lease_transfer() {  # <project-dir> <path> <holder>
   [ "$FM_TREEHOUSE_PENDING_LEASE_PATH" = "$path" ] \
     && [ "$FM_TREEHOUSE_ACQUIRE_PROJECT" = "$project" ] \
     && [ "$FM_TREEHOUSE_ACQUIRE_HOLDER" = "$holder" ] || return 1
+  fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || return 1
   FM_TREEHOUSE_PENDING_LEASE_PATH=
   fm_treehouse_acquire_context_clear
 }
@@ -457,6 +550,10 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     echo "error: a prior Treehouse lease is still awaiting ownership transfer" >&2
     return 1
   }
+  if ! fm_treehouse_recovery_sweep "$state"; then
+    echo "error: unresolved Treehouse acquisition recovery must be reconciled before a new lease" >&2
+    return 1
+  fi
   if ! fm_worktree_collision_path_count "$state"; then
     echo "error: cannot derive the durable Treehouse redraw bound from task metadata: $FM_TREEHOUSE_COLLISION_ERROR" >&2
     return 1
@@ -469,6 +566,12 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     fm_treehouse_acquire_context_clear
     return 1
   }
+  if ! fm_treehouse_recovery_receipt_write "$state" "$project" "$holder"; then
+    fm_treehouse_acquire_barrier_stop
+    fm_treehouse_acquire_context_clear
+    echo "error: cannot establish durable Treehouse acquisition cleanup ownership: $FM_TREEHOUSE_RECOVERY_ERROR" >&2
+    return 1
+  fi
   while [ "$attempt" -lt "$attempts" ]; do
     attempt=$((attempt + 1))
     FM_TREEHOUSE_ACQUIRE_OUTPUT=$(mktemp "$state/.treehouse-acquire.XXXXXX") || {
@@ -532,6 +635,9 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     identity=
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       identity=$(fm_pid_identity "$FM_TREEHOUSE_ACQUIRE_PID" 2>/dev/null || true)
+      if [ -n "$identity" ]; then
+        FM_TREEHOUSE_ACQUIRE_IDENTITY=$identity
+      fi
       if [ -n "$identity" ] && [ "$identity" = "$previous_identity" ]; then
         break
       fi
@@ -539,14 +645,11 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       sleep 0.01
     done
     if [ -z "$identity" ] || [ "$identity" != "$previous_identity" ]; then
-      kill "$FM_TREEHOUSE_ACQUIRE_PID" 2>/dev/null || true
-      wait "$FM_TREEHOUSE_ACQUIRE_PID" 2>/dev/null || true
+      fm_treehouse_active_acquire_stop
       fm_treehouse_acquire_barrier_stop
-      fm_treehouse_acquire_context_clear
       echo "error: could not capture stable Treehouse acquisition process identity" >&2
       return 1
     fi
-    FM_TREEHOUSE_ACQUIRE_IDENTITY=$identity
     : > "$FM_TREEHOUSE_ACQUIRE_START"
     if wait "$FM_TREEHOUSE_ACQUIRE_PID"; then
       acquire_status=0
@@ -558,9 +661,8 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     fm_treehouse_acquire_start_clear
     candidate=$(< "$FM_TREEHOUSE_ACQUIRE_OUTPUT")
     if [ "$acquire_status" -ne 0 ]; then
-      fm_treehouse_acquire_output_clear
+      fm_treehouse_active_acquire_stop
       fm_treehouse_acquire_barrier_stop
-      fm_treehouse_acquire_context_clear
       if [ "$rejected" -gt 0 ]; then
         echo "error: treehouse durable lease attempt $attempt failed after rejecting $rejected recorded live task worktree collision(s); could not produce a non-colliding worktree within $attempts attempts" >&2
       else
@@ -570,11 +672,8 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     fi
     case "$candidate" in
       /*$'\n'*|''|[!/]*)
-        [ -z "$candidate" ] || fm_treehouse_lease_return_if_holder \
-          "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
-        fm_treehouse_acquire_output_clear
+        fm_treehouse_active_acquire_stop
         fm_treehouse_acquire_barrier_stop
-        fm_treehouse_acquire_context_clear
         echo "error: treehouse get --lease returned a non-absolute worktree path: '${candidate:-empty}'" >&2
         return 1
         ;;
@@ -584,6 +683,9 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
       candidate_real=$(fm_worktree_real_or_raw "$candidate")
       case "$rejected_paths" in
         *$'\n'"$candidate_real"$'\n'*)
+          if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+            fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || true
+          fi
           fm_treehouse_acquire_output_clear
           fm_treehouse_acquire_barrier_stop
           fm_treehouse_acquire_context_clear
@@ -599,7 +701,6 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     else
       collision_status=$?
       if [ "$collision_status" -eq 2 ]; then
-        fm_treehouse_lease_return_if_holder "$project" "$candidate" "$holder" >/dev/null 2>&1 || true
         fm_treehouse_acquire_output_clear
         fm_treehouse_acquire_barrier_stop
         fm_treehouse_acquire_context_clear
@@ -614,6 +715,9 @@ fm_treehouse_lease_acquire_noncolliding() {  # <state-dir> <project-dir> <holder
     fm_treehouse_acquire_barrier_stop
     return 0
   done
+  if fm_treehouse_reconcile_holder_leases "$state" "$project" "$holder"; then
+    fm_treehouse_recovery_receipt_clear "$FM_TREEHOUSE_ACQUIRE_RECEIPT" || true
+  fi
   fm_treehouse_acquire_barrier_stop
   fm_treehouse_acquire_context_clear
   echo "error: treehouse could not produce a non-colliding worktree after $attempts durable lease attempts; every lease matched a recorded live task worktree in $state" >&2
@@ -794,8 +898,14 @@ fm_worktree_structural_protection_mode() {  # <meta> <process-pids> <protection-
   while IFS= read -r pid; do
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     case "$ignored_pids" in *$'\n'"$pid"$'\n'*) continue ;; esac
-    fm_worktree_process_snapshot "$pid" || continue
-    cwd=$(fm_worktree_process_cwd "$pid" 2>/dev/null) || continue
+    if ! fm_worktree_process_snapshot "$pid"; then
+      kill -0 "$pid" 2>/dev/null && uncertain_pid=$pid
+      continue
+    fi
+    if ! cwd=$(fm_worktree_process_cwd "$pid" 2>/dev/null); then
+      kill -0 "$pid" 2>/dev/null && uncertain_pid=$pid
+      continue
+    fi
     cwd=$(fm_worktree_real_or_raw "$cwd")
     case "$cwd" in
       "$FM_WORKTREE_PROTECTION_WORKTREE"|"$FM_WORKTREE_PROTECTION_WORKTREE"/*) ;;
@@ -905,6 +1015,7 @@ fm_worktree_protection_sweep() {  # <state-dir>
   local state=$1 protection_dir record meta id worktree mode status recorded_worktree
   FM_WORKTREE_PROTECTION_ERROR=
   [ -d "$state" ] || return 0
+  fm_treehouse_recovery_sweep "$state" || true
   protection_dir="$state/.worktree-protection"
   if [ -L "$protection_dir" ] || { [ -e "$protection_dir" ] && [ ! -d "$protection_dir" ]; }; then
     echo "WORKTREE_PROTECTION: failed: unsafe protection directory path: $protection_dir"

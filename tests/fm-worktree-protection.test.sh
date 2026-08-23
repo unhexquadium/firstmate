@@ -12,6 +12,7 @@ set -u
 
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worktree-protection)
+SYSTEM_PS=$(command -v ps)
 GUARD_PID=
 AGENT_PID=
 SHELL_PID=
@@ -89,6 +90,20 @@ case "${1:-}" in
   *) exit 1 ;;
 esac
 SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_UNREADABLE_PROCESS:-}" ]; then
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = -p ] && [ "$arg" = "$FM_FAKE_UNREADABLE_PROCESS" ]; then
+      exit 1
+    fi
+    previous=$arg
+  done
+fi
+exec "${FM_FAKE_REAL_PS:?FM_FAKE_REAL_PS unset}" "$@"
+SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -104,7 +119,7 @@ case "${1:-}" in
   *) exit 1 ;;
 esac
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  chmod +x "$fakebin/treehouse" "$fakebin/ps" "$fakebin/tmux"
   printf '%s\n' "$fakebin"
 }
 
@@ -114,6 +129,8 @@ run_bootstrap() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_PATH="$WORKTREE_DIR" \
     FM_FAKE_TREEHOUSE_STATUS_CWDS="$HOME_DIR/treehouse-status-cwds" \
+    FM_FAKE_REAL_PS="$SYSTEM_PS" \
+    FM_FAKE_UNREADABLE_PROCESS="${FM_FAKE_UNREADABLE_PROCESS:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$BOOTSTRAP" 2>&1
 }
@@ -362,6 +379,37 @@ test_unverified_backend_refuses_uncertain_process() {
   pass "unverified backend refuses uncertain worktree process occupancy"
 }
 
+test_unverified_backend_refuses_unreadable_live_process() {
+  local out
+  HOME_DIR="$TMP_ROOT/unreadable-process-home"
+  PROJECT_DIR="$TMP_ROOT/unreadable-process-project"
+  WORKTREE_DIR="$TMP_ROOT/unreadable-process-worktree"
+  FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/unreadable-process-fake")
+  mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
+    "$HOME_DIR/config"
+  fm_git_worktree "$PROJECT_DIR" "$WORKTREE_DIR" unreadable-process-live
+  fm_write_meta "$HOME_DIR/state/unreadable-process-task.meta" \
+    'window=unreadable-process-endpoint' "worktree=$WORKTREE_DIR" \
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship' 'backend=zellij'
+  bash -c 'cd "$1" || exit 1; exec -a codex sleep 2147483647' \
+    fm-test-unreadable-agent "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
+  AGENT_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$AGENT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
+    sleep 0.05
+  done
+
+  out=$(FM_FAKE_UNREADABLE_PROCESS="$AGENT_PID" run_bootstrap)
+  assert_contains "$out" 'WORKTREE_PROTECTION: task unreadable-process-task: skipped: cannot attribute worktree process' \
+    "live process with unreadable details was silently treated as quiescent"
+  assert_absent "$HOME_DIR/state/.worktree-protection/unreadable-process-task.protection" \
+    "live process with unreadable details received durable protection"
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
+  pass "unverified backend refuses unreadable live process occupancy"
+}
+
 test_raw_shell_harness_distinguishes_idle_endpoint() {
   local out record idle_fifo raw_fifo _
   HOME_DIR="$TMP_ROOT/raw-shell-home"
@@ -444,6 +492,7 @@ test_bootstrap_skips_plain_clone_worktree
 test_bootstrap_protects_symlinked_treehouse_root
 test_unverified_backends_use_structural_agent_occupancy
 test_unverified_backend_refuses_uncertain_process
+test_unverified_backend_refuses_unreadable_live_process
 test_raw_shell_harness_distinguishes_idle_endpoint
 
 echo "# all fm-worktree-protection tests passed"

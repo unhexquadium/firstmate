@@ -109,6 +109,7 @@ case "${1:-}" in
     ;;
   status)
     [ "${2:-}" = --json ] || exit 43
+    [ "${FM_FAKE_STATUS_FAIL:-0}" != 1 ] || exit 45
     if [ -n "${FM_FAKE_LEASE_STATE:-}" ] && [ -s "$FM_FAKE_LEASE_STATE" ]; then
       lease_holder=$(sed -n '1p' "$FM_FAKE_LEASE_STATE")
       lease_path=$(sed -n '2p' "$FM_FAKE_LEASE_STATE")
@@ -136,7 +137,16 @@ for arg in "$@"; do
 done
 if [ -n "${FM_FAKE_UNREADABLE_META:-}" ] \
   && [ "$target" = "$FM_FAKE_UNREADABLE_META" ]; then
-  exit 74
+  if [ -n "${FM_FAKE_UNREADABLE_META_AFTER:-}" ]; then
+    count=0
+    [ ! -f "$FM_FAKE_UNREADABLE_META_COUNT" ] \
+      || count=$(command -p cat "$FM_FAKE_UNREADABLE_META_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_UNREADABLE_META_COUNT"
+    [ "$count" -le "$FM_FAKE_UNREADABLE_META_AFTER" ] || exit 74
+  else
+    exit 74
+  fi
 fi
 if [ -n "${FM_FAKE_REAL_CAT:-}" ]; then
   exec "$FM_FAKE_REAL_CAT" "$@"
@@ -215,6 +225,10 @@ run_spawn() {
     FM_FAKE_EXPECT_HOLDER="fm-$id" \
     FM_FAKE_REAL_CAT="$SYSTEM_CAT" \
     FM_FAKE_UNREADABLE_META="${FM_FAKE_UNREADABLE_META:-}" \
+    FM_FAKE_UNREADABLE_META_AFTER="${FM_FAKE_UNREADABLE_META_AFTER:-}" \
+    FM_FAKE_UNREADABLE_META_COUNT="${FM_FAKE_UNREADABLE_META_COUNT:-}" \
+    FM_FAKE_LEASE_STATE="${FM_FAKE_LEASE_STATE:-}" \
+    FM_FAKE_STATUS_FAIL="${FM_FAKE_STATUS_FAIL:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -372,9 +386,67 @@ test_unreadable_metadata_refuses_before_acquisition() {
   pass "unreadable task metadata fails closed before Treehouse acquisition"
 }
 
+test_postcheck_read_failure_preserves_candidate() {
+  local rec id out status meta receipt
+  id=lease-postcheck-r11
+  rec=$(make_case postcheck "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/live-owner.meta"
+  fm_write_meta "$meta" \
+    'window=firstmate:fm-live-owner' "worktree=$COLLISION_DIR" \
+    "project=$PROJECT_DIR" 'harness=codex' 'kind=ship'
+
+  out=$(FM_FAKE_UNREADABLE_META="$meta" FM_FAKE_UNREADABLE_META_AFTER=2 \
+    FM_FAKE_UNREADABLE_META_COUNT="$CASE_DIR/meta-read.count" \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    run_spawn "$id" "$COLLISION_DIR" "$COLLISION_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a candidate after metadata became unreadable"
+  assert_contains "$out" "cannot verify durable Treehouse lease '$COLLISION_DIR'" \
+    "post-acquisition metadata failure did not fail loudly"
+  assert_no_grep "return --force --if-lease-holder fm-$id $COLLISION_DIR" \
+    "$CASE_DIR/treehouse.log" \
+    "post-acquisition metadata failure force-returned an unverified live path"
+  [ -s "$CASE_DIR/lease-state" ] \
+    || fail "post-acquisition metadata failure discarded the uncertain lease"
+  receipt="$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.receipt"
+  assert_present "$receipt" \
+    "post-acquisition metadata failure did not retain a durable cleanup owner"
+  pass "post-acquisition metadata uncertainty preserves the candidate lease"
+}
+
+test_pre_gate_cleanup_owns_wrapper() {
+  local rec out status
+  rec=$(make_case pre-gate lease-pre-gate-r11)
+  read_case_record "$rec"
+  out=$(FM_PRE_GATE_ROOT="$ROOT" FM_PRE_GATE_STATE="$HOME_DIR/state" \
+    bash -c '
+      set -u
+      . "$FM_PRE_GATE_ROOT/bin/fm-wake-lib.sh"
+      . "$FM_PRE_GATE_ROOT/bin/fm-worktree-lease-lib.sh"
+      gate="$FM_PRE_GATE_STATE/pre-gate.start"
+      (while [ ! -e "$gate" ]; do sleep 0.01; done) &
+      child=$!
+      before=$(fm_pid_identity "$child") || exit 1
+      FM_TREEHOUSE_ACQUIRE_PID=$child
+      FM_TREEHOUSE_ACQUIRE_IDENTITY=
+      FM_TREEHOUSE_ACQUIRE_START=$gate
+      fm_treehouse_active_acquire_stop
+      after=$(fm_pid_identity "$child" 2>/dev/null || true)
+      [ "$after" != "$before" ]
+    ' 2>&1)
+  status=$?
+  expect_code 0 "$status" \
+    "cleanup should own a gated acquisition wrapper before identity publication"
+  [ -z "$out" ] || fail "pre-gate cleanup emitted an unexpected diagnostic: $out"
+  assert_absent "$HOME_DIR/state/pre-gate.start" \
+    "pre-gate cleanup left its start gate behind"
+  pass "pre-gate cleanup immediately owns the acquisition wrapper"
+}
+
 test_interrupted_acquisition_reaps_barrier() {
   local rec id spawn_pid barrier_pid barrier_identity current_identity status _
-  local treehouse_identity current_treehouse_identity
+  local treehouse_identity current_treehouse_identity receipt bootstrap_out
   id=lease-interrupt-r5
   rec=$(make_case interrupt "$id")
   read_case_record "$rec"
@@ -396,6 +468,7 @@ test_interrupted_acquisition_reaps_barrier() {
     FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
     FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
     FM_FAKE_EXPECT_HOLDER="fm-$id" FM_FAKE_BLOCK_GET=1 \
+    FM_FAKE_STATUS_FAIL=1 \
     FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
     FM_FAKE_REAL_CAT="$SYSTEM_CAT" \
     FM_FAKE_BLOCK_READY="$CASE_DIR/block-ready" \
@@ -447,12 +520,39 @@ test_interrupted_acquisition_reaps_barrier() {
   BLOCKED_BARRIER_PID=
   assert_absent "$HOME_DIR/state/$id.meta" \
     "interrupted acquisition published task metadata"
+  [ -s "$CASE_DIR/lease-state" ] \
+    || fail "failed interruption reconciliation lost its durable lease evidence"
+  receipt="$HOME_DIR/state/.treehouse-acquire-recovery/fm-$id.receipt"
+  assert_present "$receipt" \
+    "failed interruption reconciliation dropped its cleanup owner"
+  assert_no_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
+    "$CASE_DIR/treehouse.log" \
+    "failed reconciliation returned an unreconciled durable lease"
+
+  bootstrap_out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_LOCKED=1 \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_TREEHOUSE_COUNT="$CASE_DIR/treehouse.count" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$CASE_DIR/treehouse.sequence" \
+    FM_FAKE_PROTECTED_PATH="$COLLISION_DIR" \
+    FM_FAKE_PROTECTED_PATHS="$CASE_DIR/protected-paths" \
+    FM_FAKE_PREACQUIRE_VIOLATION="$CASE_DIR/preacquire-violation" \
+    FM_FAKE_EXPECT_HOLDER="fm-$id" \
+    FM_FAKE_LEASE_STATE="$CASE_DIR/lease-state" \
+    FM_FAKE_REAL_CAT="$SYSTEM_CAT" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$bootstrap_out" 'acquisition recovery fm-' \
+    "locked bootstrap did not reconcile the persisted acquisition receipt"
+  assert_absent "$receipt" \
+    "locked bootstrap retained a successfully reconciled acquisition receipt"
   [ ! -s "$CASE_DIR/lease-state" ] \
-    || fail "pre-output interruption orphaned its durable Treehouse lease"
+    || fail "locked bootstrap left the unpublished durable lease held"
   assert_grep "return --force --if-lease-holder fm-$id $SAFE_DIR" \
     "$CASE_DIR/treehouse.log" \
-    "pre-output interruption did not reconcile and return its durable lease"
-  pass "an interrupted acquisition reaps its barrier and unpublished lease"
+    "locked bootstrap did not return the recovered unpublished lease"
+  pass "interruption persists and bootstrap reconciles durable cleanup ownership"
 }
 
 test_post_success_signal_returns_pending_lease() {
@@ -594,6 +694,8 @@ test_all_distinct_collisions_allow_safe_draw
 test_non_colliding_lease_is_unaffected
 test_unpublished_lease_is_returned_on_abort
 test_unreadable_metadata_refuses_before_acquisition
+test_postcheck_read_failure_preserves_candidate
+test_pre_gate_cleanup_owns_wrapper
 test_interrupted_acquisition_reaps_barrier
 test_post_success_signal_returns_pending_lease
 test_teardown_cannot_race_one_slot_acquisition
