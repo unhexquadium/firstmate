@@ -57,6 +57,10 @@ case "${1:-}" in
     ;;
   status)
     [ "${2:-}" = --json ] || exit 1
+    if [ "${FM_FAKE_TREEHOUSE_MEMBER:-1}" = 0 ]; then
+      printf '[]\n'
+      exit 0
+    fi
     processes='['
     separator=
     while IFS= read -r pid; do
@@ -73,7 +77,22 @@ case "${1:-}" in
   *) exit 1 ;;
 esac
 SH
-  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf '%s\n' 'fm-live-task' ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_AGENT_COMMAND:-bash}" ;;
+      *'#{pane_tty}'*) printf '\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
   printf '%s\n' "$fakebin"
 }
 
@@ -124,20 +143,20 @@ test_bootstrap_splits_durable_and_presence_protection() {
   assert_no_grep 'pid=' "$record" \
     "quiescent worktree was relaxed to a process-presence guard"
 
-  out=$(run_bootstrap)
-  assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
-    "idempotent durable-protection rerun reported a failure"
-  assert_grep 'mode=durable' "$record" \
-    "idempotent bootstrap replaced durable protection with presence"
-
   bash -c 'cd "$1" || exit 1; exec sleep 2147483647' \
-    fm-test-agent "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
+    fm-test-endpoint-shell "$WORKTREE_DIR" </dev/null >/dev/null 2>&1 &
   AGENT_PID=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ "$(readlink "/proc/$AGENT_PID/cwd" 2>/dev/null || true)" = "$WORKTREE_DIR" ] && break
     sleep 0.05
   done
   out=$(run_bootstrap)
+  assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
+    "idle endpoint shell caused a worktree protection failure"
+  assert_grep 'mode=durable' "$record" \
+    "idle endpoint shell was misclassified as a live agent"
+
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
     "bootstrap reported a protection failure for an occupied pool worktree"
   assert_grep 'mode=presence' "$record" \
@@ -153,16 +172,13 @@ test_bootstrap_splits_durable_and_presence_protection() {
   [ "$recorded_identity" = "$current_identity" ] \
     || fail "bootstrap presence record does not bind the live guard identity"
 
-  out=$(run_bootstrap)
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_bootstrap)
   assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
     "idempotent presence-guard rerun reported a failure"
   second_pid=$(sed -n 's/^pid=//p' "$record")
   [ "$second_pid" = "$first_pid" ] \
     || fail "idempotent bootstrap replaced a healthy worktree presence guard"
 
-  kill "$AGENT_PID" 2>/dev/null || true
-  wait "$AGENT_PID" 2>/dev/null || true
-  AGENT_PID=
   run_bootstrap >/dev/null
   assert_grep 'mode=durable' "$record" \
     "quiescent transition did not replace presence with durable protection"
@@ -170,6 +186,9 @@ test_bootstrap_splits_durable_and_presence_protection() {
     "quiescent transition retained process-only protection"
   assert_guard_stops "$first_pid"
   GUARD_PID=
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
 
   rm -f "$HOME_DIR/state/live-task.meta"
   run_bootstrap >/dev/null
@@ -186,6 +205,29 @@ test_bootstrap_splits_durable_and_presence_protection() {
   pass "bootstrap splits quiescent durable protection from occupied presence guards"
 }
 
+test_bootstrap_skips_plain_clone_worktree() {
+  local out
+  HOME_DIR="$TMP_ROOT/plain-home"
+  PROJECT_DIR="$TMP_ROOT/plain-project"
+  WORKTREE_DIR="$TMP_ROOT/plain-clone"
+  FAKEBIN_DIR=$(make_treehouse_fakebin "$TMP_ROOT/plain-fake")
+  mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/projects" \
+    "$HOME_DIR/config"
+  fm_git_init_commit "$PROJECT_DIR"
+  git clone --quiet "$PROJECT_DIR" "$WORKTREE_DIR"
+  fm_write_meta "$HOME_DIR/state/plain-secondmate.meta" \
+    'window=firstmate:fm-plain-secondmate' "worktree=$WORKTREE_DIR" \
+    "project=$WORKTREE_DIR" 'harness=codex' 'kind=secondmate'
+
+  out=$(FM_FAKE_TREEHOUSE_MEMBER=0 run_bootstrap)
+  assert_not_contains "$out" 'WORKTREE_PROTECTION:' \
+    "bootstrap reported plain-clone secondmate home as a protection failure"
+  assert_absent "$HOME_DIR/state/.worktree-protection/plain-secondmate.protection" \
+    "bootstrap registered pool protection for a plain-clone secondmate home"
+  pass "bootstrap silently excludes plain-clone secondmate homes from pool protection"
+}
+
 test_bootstrap_splits_durable_and_presence_protection
+test_bootstrap_skips_plain_clone_worktree
 
 echo "# all fm-worktree-protection tests passed"

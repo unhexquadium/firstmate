@@ -49,6 +49,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-lease-lib.sh
+. "$SCRIPT_DIR/fm-worktree-lease-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -388,23 +390,24 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() {
-  local id=$1 home
+  local id=$1
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+  fm_treehouse_lease_acquire_noncolliding "$STATE" "$FM_ROOT" "$id" || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
-  [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
-  printf '%s\n' "$home"
+  [ -n "$FM_TREEHOUSE_LEASE_PATH" ] \
+    || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
 }
 
 ensure_home() {
   local id=$1 requested=$2 home
   if [ "$requested" = "-" ]; then
-    home=$(acquire_treehouse_home "$id")
+    acquire_treehouse_home "$id"
+    home=$FM_TREEHOUSE_LEASE_PATH
     verify_firstmate_home "$home"
     return
   fi
@@ -504,6 +507,15 @@ SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_REGISTRY_LOCK=
 SEED_REGISTRY_LOCK_HELD=0
+SEED_TASK_SET_LOCK=
+SEED_TASK_SET_LOCK_HELD=0
+
+seed_task_set_lock_release() {
+  if [ "$SEED_TASK_SET_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$SEED_TASK_SET_LOCK"
+    SEED_TASK_SET_LOCK_HELD=0
+  fi
+}
 
 seed_registry_lock_release() {
   if [ "$SEED_REGISTRY_LOCK_HELD" -eq 1 ]; then
@@ -513,7 +525,9 @@ seed_registry_lock_release() {
 }
 
 seed_exit_cleanup() {
+  fm_treehouse_acquire_barrier_stop
   seed_rollback
+  seed_task_set_lock_release
   seed_registry_lock_release
 }
 SEED_HOME=
@@ -824,10 +838,15 @@ seed_home() {
   fi
 
   mkdir -p "$STATE" || return 1
+  trap seed_exit_cleanup EXIT
+  if [ "$requested_home" = "-" ]; then
+    SEED_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || return 1
+    fm_lock_acquire_wait "$SEED_TASK_SET_LOCK" || return 1
+    SEED_TASK_SET_LOCK_HELD=1
+  fi
   SEED_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
   fm_lock_acquire_wait "$SEED_REGISTRY_LOCK" || return 1
   SEED_REGISTRY_LOCK_HELD=1
-  trap seed_exit_cleanup EXIT
 
   validate_registry
   for project in "$@"; do
@@ -858,7 +877,9 @@ seed_home() {
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
-    home=$(acquire_treehouse_home "$id")
+    acquire_treehouse_home "$id"
+    home=$FM_TREEHOUSE_LEASE_PATH
+    seed_task_set_lock_release
     SEED_HOME="$home"
     home=$(verify_firstmate_home "$home")
   else

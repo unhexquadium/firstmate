@@ -295,6 +295,47 @@ test_home_seed_uses_treehouse_acquired_home() {
   pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
 }
 
+test_home_seed_redraws_recorded_treehouse_home() {
+  local home collision safe fakebin log sequence count out
+  home="$TMP_ROOT/dash-guard-home"
+  collision="$TMP_ROOT/dash-guard-collision"
+  safe="$TMP_ROOT/dash-guard-safe"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-guard-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$collision"
+  git clone --quiet "$ROOT" "$safe"
+  fm_write_meta "$home/state/live-task.meta" \
+    'window=firstmate:fm-live-task' "worktree=$collision" \
+    "project=$ROOT" 'harness=codex' 'kind=ship'
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-guard-fake")
+  log="$TMP_ROOT/dash-guard-fake/tmux.log"
+  sequence="$TMP_ROOT/dash-guard-fake/sequence"
+  count="$TMP_ROOT/dash-guard-fake/count"
+  printf '%s\n%s\n' "$collision" "$safe" > "$sequence"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_SEQUENCE="$sequence" FM_FAKE_TREEHOUSE_COUNT="$count" \
+    FM_FAKE_TREEHOUSE_PROTECTED_PATH="$collision" \
+    FM_FAKE_TREEHOUSE_PREACQUIRE_VIOLATION="$TMP_ROOT/dash-guard-fake/violation" \
+    FM_SECONDMATE_CHARTER='guarded acquired scope' \
+    FM_SECONDMATE_SCOPE='guarded acquired scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash-guard - alpha) \
+    || fail "home seed failed while redrawing a recorded Treehouse worktree"
+  assert_contains "$out" "home=$safe" \
+    "home seed did not publish the non-colliding Treehouse redraw"
+  [ "$(cat "$count")" -eq 2 ] \
+    || fail "home seed did not redraw exactly once after the recorded collision"
+  assert_absent "$TMP_ROOT/dash-guard-fake/violation" \
+    "home seed reached a recorded worktree before the shared exclusion barrier"
+  assert_absent "$collision/.fm-secondmate-home" \
+    "home seed initialized the recorded live task worktree"
+  assert_present "$safe/.fm-secondmate-home" \
+    "home seed did not initialize the safe redrawn worktree"
+  pass "home seeding uses the shared collision exclusion and redraw boundary"
+}
+
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   local home acquired acquired_abs fakebin log err
   home="$TMP_ROOT/dash-fail-home"
@@ -2963,6 +3004,7 @@ test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
+test_home_seed_redraws_recorded_treehouse_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home

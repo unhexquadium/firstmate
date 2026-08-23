@@ -54,6 +54,15 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+worktree_in_use() {
+  local path=$1 link cwd
+  [ -d /proc ] || return 1
+  for link in /proc/[0-9]*/cwd; do
+    cwd=$(readlink "$link" 2>/dev/null || true)
+    case "$cwd" in "$path"|"$path"/*) return 0 ;; esac
+  done
+  return 1
+}
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
   get)
@@ -69,11 +78,24 @@ case "${1:-}" in
       esac
       shift
     done
-    if [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
-      mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
+    path=${FM_FAKE_TREEHOUSE_HOME:-}
+    if [ -n "${FM_FAKE_TREEHOUSE_SEQUENCE:-}" ]; then
+      count=0
+      [ ! -f "$FM_FAKE_TREEHOUSE_COUNT" ] || count=$(cat "$FM_FAKE_TREEHOUSE_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_TREEHOUSE_COUNT"
+      path=$(sed -n "${count}p" "$FM_FAKE_TREEHOUSE_SEQUENCE")
+      [ -n "$path" ] || path=$(tail -n 1 "$FM_FAKE_TREEHOUSE_SEQUENCE")
+    fi
+    if [ -n "$path" ]; then
+      if [ "$path" = "${FM_FAKE_TREEHOUSE_PROTECTED_PATH:-}" ] \
+        && ! worktree_in_use "$path"; then
+        : > "${FM_FAKE_TREEHOUSE_PREACQUIRE_VIOLATION:?FM_FAKE_TREEHOUSE_PREACQUIRE_VIOLATION unset}"
+      fi
+      mkdir -p "$path"
       [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
       printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
-      printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"
+      printf '%s\n' "$path"
     fi
     exit 0
     ;;
