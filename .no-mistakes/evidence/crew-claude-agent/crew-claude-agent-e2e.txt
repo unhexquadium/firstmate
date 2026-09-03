@@ -1,0 +1,144 @@
+config/crew-claude-agent - end-to-end operator walkthrough
+==========================================================
+
+Real bin/fm-spawn.sh runs against a fake tmux pane; each captured launch
+command is then EXECUTED with a 'claude' stub that prints the argv the
+worker process actually receives. Long temp paths are as produced.
+
+
+============================================================
+1. Today's default: no config/crew-claude-agent in the firstmate home
+============================================================
+$ ls ~/firstmate-home/config/
+crew-harness
+
+$ fm-spawn.sh demo-worker <repo> --mode no-mistakes --yolo off
+warning: /var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/no-agent-file/home/data/demo-worker/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned demo-worker harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-demo-worker worktree=/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/no-agent-file/wt
+
+launch command typed into the crewmate pane:
+  env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('/Users/kalvirahallesy/.no-mistakes/worktrees/68bdd092a198/01M1KFNHM19Q9YTYBNDBWHRH3Q/bin/fm-operational-input.sh' encode launch-brief < '/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/no-agent-file/home/data/demo-worker/launch-brief.md')"
+
+running that command (claude stubbed to print its argv):
+claude invoked with argv:
+  argv[1] = --dangerously-skip-permissions
+  argv[2] = ⁣FIRSTMATE_OP: v1 launch-brief: # Task
+## Captain's intent
+brief for demo-worker
+
+## Firstmate spec
+Exercise the spawn behavior under test.
+
+# Current no-mistakes intent contract
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
+Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+
+## Captain intent authorized for --intent
+brief for demo-worker
+
+Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+
+============================================================
+2. Operator opts in: config/crew-claude-agent names a worker profile
+============================================================
+$ printf %s\\n "# workers get their own profile, not the orchestrator one" "crewmate" > ~/firstmate-home/config/crew-claude-agent
+$ cat ~/firstmate-home/config/crew-claude-agent
+# workers get their own profile, not the orchestrator one
+crewmate
+
+$ fm-spawn.sh demo-worker <repo> --model sonnet --effort high --mode no-mistakes --yolo off
+warning: /var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/opt-in/home/data/demo-worker/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned demo-worker harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-demo-worker worktree=/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/opt-in/wt
+
+crewmate launch command:
+  env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --model 'sonnet' --effort 'high' --agent 'crewmate' "$('/Users/kalvirahallesy/.no-mistakes/worktrees/68bdd092a198/01M1KFNHM19Q9YTYBNDBWHRH3Q/bin/fm-operational-input.sh' encode launch-brief < '/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/opt-in/home/data/demo-worker/launch-brief.md')"
+
+running it:
+claude invoked with argv:
+  argv[1] = --dangerously-skip-permissions
+  argv[2] = --model
+  argv[3] = sonnet
+  argv[4] = --effort
+  argv[5] = high
+  argv[6] = --agent
+  argv[7] = crewmate
+  argv[8] = ⁣FIRSTMATE_OP: v1 launch-brief: # Task
+## Captain's intent
+brief for demo-worker
+
+## Firstmate spec
+Exercise the spawn behavior under test.
+
+# Current no-mistakes intent contract
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
+Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+
+## Captain intent authorized for --intent
+brief for demo-worker
+
+Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+
+$ fm-spawn.sh demo-scout <repo> --scout
+spawned demo-scout harness=claude kind=scout window=firstmate:fm-demo-scout worktree=/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/opt-in/wt
+
+scout launch command:
+  env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --agent 'crewmate' "$('/Users/kalvirahallesy/.no-mistakes/worktrees/68bdd092a198/01M1KFNHM19Q9YTYBNDBWHRH3Q/bin/fm-operational-input.sh' encode launch-brief < '/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/opt-in/home/data/demo-scout/brief.md')"
+
+running it:
+claude invoked with argv:
+  argv[1] = --dangerously-skip-permissions
+  argv[2] = --agent
+  argv[3] = crewmate
+  argv[4] = ⁣FIRSTMATE_OP: v1 launch-brief: # Task
+## Captain's intent
+brief for demo-scout
+
+## Firstmate spec
+Exercise the spawn behavior under test.
+
+============================================================
+3. A secondmate is a firstmate in its own home: it keeps the operator default
+============================================================
+$ fm-spawn.sh demo-second <secondmate-home> --secondmate
+warning: secondmate demo-second sync skipped before launch: primary default-branch commit cannot be resolved
+spawned demo-second harness=claude kind=secondmate mode=secondmate yolo=off window=firstmate:fm-demo-second worktree=/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-demo.qkjPnT/secondmate/secondmate-home
+
+secondmate launch command:
+  FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME='/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/secondmate/home' FM_HOME='/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-demo.qkjPnT/secondmate/secondmate-home' FM_TRACE_CONTEXT=off FM_SUPERVISION_MODEL=autoarm env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('/Users/kalvirahallesy/.no-mistakes/worktrees/68bdd092a198/01M1KFNHM19Q9YTYBNDBWHRH3Q/bin/fm-operational-input.sh' encode launch-brief < '/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-demo.qkjPnT/secondmate/secondmate-home/data/charter.md')"
+
+running it:
+claude invoked with argv:
+  argv[1] = --dangerously-skip-permissions
+  argv[2] = ⁣FIRSTMATE_OP: v1 launch-brief: charter for demo-second
+
+============================================================
+4. Malformed file refuses the spawn instead of launching something unsafe
+============================================================
+$ cat ~/firstmate-home/config/crew-claude-agent
+bad name; rm -rf /
+
+$ fm-spawn.sh demo-worker <repo> --mode no-mistakes --yolo off
+error: config/crew-claude-agent names an unsafe agent profile 'bad name; rm -rf /'; use letters, digits, and _ - . : only
+exit status: 1
+state/demo-worker.meta written? no - refused before any task state
+
+============================================================
+5. Raw launch command has no agent slot: unchanged and never refused
+============================================================
+$ fm-spawn.sh demo-worker <repo> "claude --resume" --mode no-mistakes --yolo off
+warning: /var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/raw-launch/home/data/demo-worker/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned demo-worker harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-demo-worker worktree=/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT/raw-launch/wt
+exit status: 0
+
+launch command:
+  env -u CURSOR_AGENT -u CURSOR_INVOKED_AS claude --resume
+
+============================================================
+6. Inheritance: a secondmate home receives the primary's crew-claude-agent
+============================================================
+$ propagate_inheritable_config <primary-config> <secondmate-config>
+
+$ cat <secondmate-home>/config/crew-claude-agent
+crewmate
+
+(demo root /var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T//fm-crew-agent-demo.qkjPnT)

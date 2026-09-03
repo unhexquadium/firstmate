@@ -1,0 +1,16 @@
+The --agent flag against the REAL claude binary (not a stub)
+===========================================================
+
+A configured, existing profile starts a session:
+
+  $ claude --agent crewmate -p 'Reply with exactly one line: AGENT-PROFILE-OK'
+  AGENT-PROFILE-OK
+
+An agent name the machine's Claude installation does not define refuses to
+start, which is exactly the failure mode docs/configuration.md now documents
+for an unchecked config/crew-claude-agent value:
+
+  $ claude --agent __fm_nonexistent_probe__ -p 'say ok'
+  --agent '__fm_nonexistent_probe__' not found. Available agents: claude,
+  codex:codex-rescue, crewmate, Explore, general-purpose, orchestrator, Plan,
+  scout, statusline-setup

@@ -1,0 +1,29 @@
+config/crew-claude-agent on a --relaunch onto claude
+====================================================
+
+Real fm-control.sh relaunch of an existing live claude ship task,
+using tests/fm-control-relaunch.test.sh's hermetic fixtures.
+
+$ cat <home>/state/rl-agent.meta
+  window=fmses:fm-rl-agent
+  endpoint_task_id=rl-agent
+  worktree=/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-relaunch.CQDoUr/relaunch-28181/wt
+  project=/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-relaunch.CQDoUr/relaunch-28181/proj
+  harness=claude
+  kind=ship
+  mode=no-mistakes
+  yolo=off
+  tasktmp=/tmp/fm-rl-agent
+  model=default
+  effort=default
+
+$ printf %s\\n crewmate > <home>/config/crew-claude-agent
+
+$ fm-control.sh rl-agent relaunch --note "stopped mid-refactor"
+  warning: /private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-relaunch.CQDoUr/relaunch-28181/home/data/rl-agent/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+  relaunched rl-agent harness=claude from=claude model=default effort=default backend=tmux endpoint=fmses:fm-rl-agent worktree=/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-relaunch.CQDoUr/relaunch-28181/wt
+
+launch command the replacement claude agent was started with:
+  unset TRACEPARENT; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --agent 'crewmate' "$('/Users/kalvirahallesy/.no-mistakes/worktrees/68bdd092a198/01M1KFNHM19Q9YTYBNDBWHRH3Q/bin/fm-operational-input.sh' encode launch-brief < '/private/var/folders/qt/8_dljtx54y9479tv_nqq9cl80000gn/T/fm-crew-agent-relaunch.CQDoUr/relaunch-28181/home/data/rl-agent/launch-brief.md')"
+
+carries the configured agent profile? yes
