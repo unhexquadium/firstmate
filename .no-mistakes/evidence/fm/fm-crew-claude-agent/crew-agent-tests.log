@@ -1,0 +1,8 @@
+ok - an absent config/crew-claude-agent launches claude without --agent
+ok - config/crew-claude-agent adds only --agent <name> to a claude ship launch
+ok - config/crew-claude-agent reaches claude scout launches, including a plugin:agent name
+ok - unsafe or malformed config/crew-claude-agent content refuses before any endpoint or metadata
+ok - codex ignores valid and malformed config/crew-claude-agent
+ok - raw claude command ignores malformed worker template config
+ok - claude secondmate ignores malformed worker agent config and inherits it for its crew
+ok - config/crew-claude-agent skips the secondmate launch and is inherited by its crew launches

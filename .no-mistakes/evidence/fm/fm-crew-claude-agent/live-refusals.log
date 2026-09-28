@@ -1,0 +1,66 @@
+
+INPUT=crew\ mate
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'crew mate'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=\$\(touch\ pwned\)
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds '$(touch pwned)'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=crew\;mate
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'crew;mate'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=-rf
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds '-rf'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=:crewmate
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds ':crewmate'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=a:b:c
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'a:b:c'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=$'crewmate\nscout'
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'crewmate?scout'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+INPUT=''
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds ''; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1; metadata_exists=no; project_worktrees=1
+
+CASE=scout
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'crew mate'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1
+
+CASE=relaunch
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: task ship-h's endpoint reads 'alive'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh ship-h exit)
+exit=1
+
+CASE=unreadable
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent must be a readable regular file holding one Claude agent name
+exit=1
+
+CASE=overlong
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+exit=1
+Existing worker metadata unchanged; rejected scouts have no task records: yes
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+stopped ship-h harness=claude backend=tmux endpoint=primary:fm-ship-h worktree=/home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l/pool/.treehouse/probe-b1b639/7/probe
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+error: config/crew-claude-agent holds 'crew mate'; expected one Claude agent name of letters, digits, '-' or '_', optionally namespaced as plugin:agent (at most 128 characters); remove the file to launch without --agent
+Stopped-worker invalid-config relaunch exit=1

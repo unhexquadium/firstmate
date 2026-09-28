@@ -1,0 +1,5 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+warning: /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l/data/ship-d/launch-brief.md records no ship branch; defaulting to legacy branch fm/ship-d
+warning: /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l/data/ship-d/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode local-only - confirm its definition of done matches
+notice: ship-d ships mode=local-only while the standing posture for probe is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+spawned ship-d harness=claude kind=ship mode=local-only yolo=off window=primary:fm-ship-d worktree=/home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l/pool/.treehouse/probe-b1b639/3/probe

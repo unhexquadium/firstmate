@@ -1,0 +1,3 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/l
+warning: secondmate sm-malformed sync skipped before launch: primary default-branch commit cannot be resolved
+spawned sm-malformed harness=claude kind=secondmate mode=secondmate yolo=off window=primary:fm-sm-malformed worktree=/home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MX6YJKS699PE403N0MND3T/u
