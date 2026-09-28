@@ -1,0 +1,11 @@
+ok - fm-teardown: a missing worktree= still refuses, and only an exact no_worktree=1 on a non-Orca scout record is accepted in its place
+ok - fm-teardown: a scout record carrying the no-worktree marker closes its endpoint and retires its record without touching any worktree, slot, or report
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFUSED: unsafe secondmate home removal target /home/kalvira/.no-mistakes/worktrees/29769f6dfb27/01M3MVAEX3RFVNZE30S9GA8X8W/.test-lab/tmp/fm-teardown-endpoint-safety.dfm8uM/secondmate-child-close-failure/mate is inside the firstmate repo
+not ok - the refusal did not name the child whose endpoint could not be closed
