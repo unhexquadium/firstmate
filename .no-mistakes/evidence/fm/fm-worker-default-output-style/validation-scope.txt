@@ -1,0 +1,10 @@
+Real consumer: Claude Code 2.1.312 using the existing normal login.
+Synthetic input: project output style orchestrator, commanding STYLE_CONTROL.
+Oracle: task workers must select default; secondmates retain orchestrator.
+Settings originate from execution of bin/fm-spawn.sh through selected existing behavioral tests. Backend transports in those tests are mocks, and those tests are not counted as live.
+Live checks feed the emitted JSON unchanged to Claude through --settings or .claude/settings.local.json; project-level disableAllHooks=true avoids unrelated lifecycle side effects. Tools and MCP are disabled. Each Claude process completed successfully.
+This proves local Claude configuration consumption and response behavior, not live pane dispatch or a T3 provider launch.
+An initial isolated-config probe emitted the correct control style but could not authenticate. The normal-login control and all eight final checks then completed successfully.
+Initial test fixtures inside the repository triggered the intentional secondmate-home guard. Re-running with disposable test fixtures in the evidence directory resolved that setup failure.
+T3 is absent from PATH. The user explicitly accepted the live T3 provider scenario as untested and prohibited sign-in.
+The selected test runners cleaned their fixtures and fake server. All foreground child statuses were collected. The disposable worktree consumer and config were removed. No source files were changed.

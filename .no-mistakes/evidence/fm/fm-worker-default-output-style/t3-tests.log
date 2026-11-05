@@ -1,0 +1,3 @@
+ok - fm-spawn.sh --backend t3code ship: leases the slot, launches the thread on it, records metadata, sends the launch brief
+ok - fm-spawn.sh --backend t3code scout: leases the slot, launches the thread on it, records metadata, sends the launch brief
+ok - fm-spawn.sh --backend t3code --secondmate: project on the home, root-strategy thread, charter message, launch prefix as settings env

@@ -1,0 +1,4 @@
+ok - a claude crewmate launch carries the attribution-off policy and default output style in its own settings
+ok - config/claude-permission-mode=auto reaches scout launches too
+ok - keep-ai-trailers omits Claude attribution settings and the pane strip hooks
+ok - a claude secondmate launch carries the attribution-off policy too and keeps the captain's output style

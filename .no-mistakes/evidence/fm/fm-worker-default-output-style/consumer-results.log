@@ -1,0 +1,8 @@
+{"scenario": "control", "source": null, "expected": "orchestrator", "actual": "orchestrator", "exit_code": 0, "is_error": false, "reply": "STYLE_CONTROL"}
+{"scenario": "ship-inline", "source": "dispatch-0-settings.json", "expected": "default", "actual": "default", "exit_code": 0, "is_error": false, "reply": "Ready."}
+{"scenario": "scout-inline", "source": "dispatch-1-settings.json", "expected": "default", "actual": "default", "exit_code": 0, "is_error": false, "reply": "Ready."}
+{"scenario": "keep-trailers-inline", "source": "dispatch-2-settings.json", "expected": "default", "actual": "default", "exit_code": 0, "is_error": false, "reply": "Okay."}
+{"scenario": "secondmate-inline", "source": "dispatch-3-settings.json", "expected": "orchestrator", "actual": "orchestrator", "exit_code": 0, "is_error": false, "reply": "STYLE_CONTROL"}
+{"scenario": "t3-ship-local", "source": "t3-0-local.json", "expected": "default", "actual": "default", "exit_code": 0, "is_error": false, "reply": "Ready."}
+{"scenario": "t3-scout-local", "source": "t3-1-local.json", "expected": "default", "actual": "default", "exit_code": 0, "is_error": false, "reply": "Ready."}
+{"scenario": "t3-secondmate-local", "source": "t3-secondmate-local.json", "expected": "orchestrator", "actual": "orchestrator", "exit_code": 0, "is_error": false, "reply": "STYLE_CONTROL"}
